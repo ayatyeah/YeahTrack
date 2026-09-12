@@ -7,6 +7,7 @@ VERSION=0.10.14
 CDN="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@$VERSION"
 HAND="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 POSE="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+FACE="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 
 mkdir -p vendor/wasm models
 echo "MediaPipe $VERSION…"
@@ -19,6 +20,8 @@ echo "модель кисти…"
 curl -sfL -o models/hand_landmarker.task "$HAND"
 echo "модель скелета (режим Дэвида Лэйда)…"
 curl -sfL -o models/pose_landmarker_lite.task "$POSE"
+echo "модель лица (режим эдитов)…"
+curl -sfL -o models/face_landmarker.task "$FACE"
 
 du -sh vendor models
 echo "готово"

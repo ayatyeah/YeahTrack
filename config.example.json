@@ -31,6 +31,13 @@
     "voice": false
   },
 
+  "edit": {
+    "preset": "gym",
+    "seconds": 15,
+    "vertical": true,
+    "faceTrack": true
+  },
+
   "guard": {
     "armSec": 15,
     "sensitivity": 12,

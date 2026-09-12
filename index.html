@@ -36,6 +36,7 @@
         <button class="mode" id="modeLaid" data-mode="laid">Режим Дэвида Лэйда</button>
         <button class="mode" id="modePosture" data-mode="posture">Режим осанки</button>
         <button class="mode" id="modeGuard" data-mode="guard">Режим охраны</button>
+        <button class="mode" id="modeEdit" data-mode="edit">Генератор эдитов</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -154,6 +155,30 @@
       </label>
       <div class="row guard-only"><span>Тревог</span><b id="guardCount">0</b></div>
       <p class="hint guard-only">Снимки лежат в ~/.local/share/yeahtrack/guard</p>
+
+      <div class="sep edit-only">Эдит</div>
+      <div class="row edit-only">
+        <select id="editPreset"></select>
+      </div>
+      <label class="row edit-only">
+        <span>Длительность, с</span>
+        <input type="range" id="optEditSec" min="5" max="60" step="5" value="15">
+      </label>
+      <label class="row edit-only">
+        <span>Держать лицо в центре</span>
+        <input type="checkbox" id="optFaceTrack" checked>
+      </label>
+      <label class="row edit-only">
+        <span>Вертикально 9:16</span>
+        <input type="checkbox" id="optVertical" checked>
+      </label>
+      <div class="row edit-only">
+        <input type="file" id="editMusic" accept="audio/*">
+      </div>
+      <button id="editRec" class="edit-only">Записать эдит</button>
+      <a id="editSave" class="secondary edit-only" hidden download>Скачать ролик</a>
+      <p class="hint edit-only">Биты берутся из твоего трека. Без музыки
+      эффекты идут в ровном темпе.</p>
 
       <div class="sep">Вид</div>
       <label class="row">

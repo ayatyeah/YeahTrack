@@ -103,6 +103,12 @@ DEFAULT_CONFIG = {
         'cooldownSec': 600,     # и не чаще раза в десять минут
         'voice': False,
     },
+    'edit': {
+        'preset': 'gym',        # gym, neon, film, bw, glitch
+        'seconds': 15,
+        'vertical': True,
+        'faceTrack': True,
+    },
     'guard': {
         'armSec': 15,           # столько на то, чтобы уйти из кадра
         'sensitivity': 12,      # порог различия кадров, меньше — чувствительнее

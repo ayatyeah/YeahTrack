@@ -1,4 +1,5 @@
-import { FilesetResolver, HandLandmarker, PoseLandmarker } from './vendor/vision_bundle.mjs';
+import { FilesetResolver, HandLandmarker, PoseLandmarker, FaceLandmarker }
+  from './vendor/vision_bundle.mjs';
 
 const video   = document.getElementById('video');
 const canvas  = document.getElementById('overlay');
@@ -31,6 +32,7 @@ const cfg = {
   idle: { afterSec: 5, fps: 4 },
   posture: { fps: 3, slouch: 0.12, tiltDeg: 8, holdSec: 8, cooldownSec: 600, voice: false },
   guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
+  edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true },
   laid: {
     media: true,
     mediaAfter: 0,            // 0 — по первому сгибанию, иначе столько зачтённых повторений
@@ -77,6 +79,13 @@ async function loadConfig() {
   if (typeof cfg.guard?.sensitivity === 'number') opt.sens.value = String(cfg.guard.sensitivity);
   if (cfg.guard && cfg.guard.person === false) opt.person.checked = false;
   if (cfg.guard && cfg.guard.shots === false) opt.shots.checked = false;
+  if (cfg.edit?.preset && PRESETS[cfg.edit.preset]) {
+    edit.preset = cfg.edit.preset;
+    editPresetSel.value = edit.preset;
+  }
+  if (typeof cfg.edit?.seconds === 'number') opt.editSec.value = String(cfg.edit.seconds);
+  if (cfg.edit && cfg.edit.vertical === false) opt.vertical.checked = false;
+  if (cfg.edit && cfg.edit.faceTrack === false) opt.faceTrack.checked = false;
   if (cfg.mode && cfg.mode !== 'gestures') setMode(cfg.mode);
 }
 
@@ -106,6 +115,9 @@ const opt = {
   person:   document.getElementById('optPerson'),
   sens:     document.getElementById('optSens'),
   shots:    document.getElementById('optShots'),
+  editSec:  document.getElementById('optEditSec'),
+  faceTrack: document.getElementById('optFaceTrack'),
+  vertical: document.getElementById('optVertical'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -119,6 +131,10 @@ const todayEl    = document.getElementById('todayTotal');
 const exerciseSel= document.getElementById('exerciseSel');
 const postureWarnsEl = document.getElementById('postureWarns');
 const guardCountEl   = document.getElementById('guardCount');
+const editPresetSel  = document.getElementById('editPreset');
+const editRecBtn     = document.getElementById('editRec');
+const editSaveEl     = document.getElementById('editSave');
+const editMusicEl    = document.getElementById('editMusic');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -1494,6 +1510,319 @@ function runGuard(drawing) {
   if (drawing && lastPose?.landmarks?.[0]) drawPosture(lastPose.landmarks[0], null);
 }
 
+// --- генератор эдитов ------------------------------------------------------
+// Лицо держим в кадре моделью лица, биты берём из трека, эффекты бьют по битам.
+// Всё рисуется в отдельный холст 1080×1920, он же и пишется в файл.
+const PRESETS = {
+  gym:    { name: 'Качалка',       filter: 'contrast(1.25) saturate(1.15)', split: 5,  flash: 0.22, shake: 6,  zoom: 0.10, grain: 0.05, vignette: 0.5 },
+  neon:   { name: 'Неон',          filter: 'contrast(1.2) saturate(1.6) hue-rotate(-12deg)', split: 9, flash: 0.18, shake: 4, zoom: 0.08, grain: 0.04, vignette: 0.55 },
+  film:   { name: 'Плёнка',        filter: 'contrast(1.1) saturate(0.85) sepia(0.18)', split: 2, flash: 0.08, shake: 2, zoom: 0.05, grain: 0.22, vignette: 0.7 },
+  bw:     { name: 'Чёрно-белый',   filter: 'grayscale(1) contrast(1.35)', split: 3, flash: 0.25, shake: 5, zoom: 0.09, grain: 0.12, vignette: 0.65 },
+  glitch: { name: 'Глитч',         filter: 'contrast(1.3) saturate(1.3)', split: 18, flash: 0.3, shake: 14, zoom: 0.13, grain: 0.08, vignette: 0.45 },
+};
+
+const BEAT_GAP = 220;      // мс: чаще этого бит не бывает даже в быстром треке
+const BEAT_RISE = 1.35;    // во сколько раз бас должен превысить свою же среднюю
+const NO_MUSIC_BPM = 120;  // без трека бьём ровным темпом
+
+const edit = {
+  preset: 'gym',
+  face: null,              // сглаженная рамка лица
+  pulse: 0,                // затухает после каждого бита
+  beats: 0,
+  lastBeat: 0,
+  energy: 0,
+  avg: 0,
+  recorder: null,
+  chunks: [],
+  stopAt: 0,
+  url: null,
+};
+
+let faceLandmarker = null;
+let faceLoading = null;
+let audioCtx = null, analyser = null, musicEl = null, musicDest = null, freqData = null;
+
+const renderCanvas = document.createElement('canvas');
+const rctx = renderCanvas.getContext('2d');
+const grainCanvas = document.createElement('canvas');
+
+function makeGrain() {
+  grainCanvas.width = grainCanvas.height = 220;
+  const g = grainCanvas.getContext('2d');
+  const img = g.createImageData(220, 220);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 90 + Math.random() * 130;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+    img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+}
+makeGrain();
+
+function loadFace() {
+  if (faceLandmarker) return Promise.resolve(faceLandmarker);
+  if (faceLoading) return faceLoading;
+  faceLoading = (async () => {
+    const fileset = await FilesetResolver.forVisionTasks('./vendor/wasm');
+    const make = delegate => FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: './models/face_landmarker.task', delegate },
+      runningMode: 'VIDEO',
+      numFaces: 1,
+    });
+    try {
+      faceLandmarker = await make(DAEMON ? 'CPU' : 'GPU');
+    } catch (e) {
+      console.warn('лицо на GPU не пошло, беру CPU', e);
+      faceLandmarker = await make('CPU');
+    }
+    return faceLandmarker;
+  })();
+  return faceLoading;
+}
+
+// --- музыка и биты ---------------------------------------------------------
+async function loadMusic(file) {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!musicEl) {
+    musicEl = new Audio();
+    musicEl.loop = true;
+    const src = audioCtx.createMediaElementSource(musicEl);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.6;
+    musicDest = audioCtx.createMediaStreamDestination();
+    src.connect(analyser);
+    analyser.connect(audioCtx.destination);   // слышим
+    analyser.connect(musicDest);              // и пишем в ролик
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+  }
+  musicEl.src = URL.createObjectURL(file);
+  await audioCtx.resume();
+  say(`трек: ${file.name}`);
+}
+
+function detectBeat(now) {
+  if (!analyser || musicEl?.paused) {
+    // без музыки — ровный метроном, чтобы эдит всё равно дышал
+    if (now - edit.lastBeat > 60000 / NO_MUSIC_BPM) { edit.lastBeat = now; edit.beats++; return true; }
+    return false;
+  }
+  analyser.getByteFrequencyData(freqData);
+  let sum = 0;
+  for (let i = 1; i <= 8; i++) sum += freqData[i];      // низ спектра — бочка
+  edit.energy = sum / 8;
+  edit.avg = edit.avg ? edit.avg * 0.94 + edit.energy * 0.06 : edit.energy;
+  if (edit.energy > edit.avg * BEAT_RISE && now - edit.lastBeat > BEAT_GAP) {
+    edit.lastBeat = now;
+    edit.beats++;
+    return true;
+  }
+  return false;
+}
+
+// --- кадрирование по лицу --------------------------------------------------
+function faceBox(res) {
+  const lm = res?.faceLandmarks?.[0];
+  if (!lm || !lm.length) return null;
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  for (const p of lm) {
+    if (p.x < x0) x0 = p.x;
+    if (p.x > x1) x1 = p.x;
+    if (p.y < y0) y0 = p.y;
+    if (p.y > y1) y1 = p.y;
+  }
+  return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 };
+}
+
+function cropFor(vw, vh, aspect) {
+  // без лица берём центр кадра, с лицом — рамку вокруг него с запасом
+  const f = edit.face;
+  let cx = 0.5, cy = 0.5, height = 1;
+  if (f && opt.faceTrack.checked) {
+    cx = f.cx;
+    cy = f.cy + f.h * 0.35;            // лицо смотрится лучше выше центра
+    height = Math.min(f.h * 4.2, 1);
+  }
+  let ch = height * vh;
+  let cw = ch * aspect;
+  if (cw > vw) { cw = vw; ch = cw / aspect; }
+  const x = Math.min(Math.max(cx * vw - cw / 2, 0), vw - cw);
+  const y = Math.min(Math.max(cy * vh - ch / 2, 0), vh - ch);
+  return { x, y, w: cw, h: ch };
+}
+
+// --- отрисовка кадра эдита -------------------------------------------------
+function renderEdit(now) {
+  const p = PRESETS[edit.preset] || PRESETS.gym;
+  const vertical = opt.vertical.checked;
+  const W = vertical ? 1080 : 1280;
+  const H = vertical ? 1920 : 720;
+  if (renderCanvas.width !== W) { renderCanvas.width = W; renderCanvas.height = H; }
+
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  const crop = cropFor(vw, vh, W / H);
+
+  // удар: рывок зума, тряска и вспышка затухают к следующему биту
+  const k = edit.pulse;
+  const zoom = 1 + p.zoom * k;
+  const sw = crop.w / zoom, sh = crop.h / zoom;
+  const jitter = p.shake * k;
+  const sx = crop.x + (crop.w - sw) / 2 + (Math.random() - 0.5) * jitter;
+  const sy = crop.y + (crop.h - sh) / 2 + (Math.random() - 0.5) * jitter;
+
+  rctx.setTransform(1, 0, 0, 1, 0, 0);
+  rctx.globalAlpha = 1;
+  rctx.globalCompositeOperation = 'source-over';
+  rctx.filter = p.filter;
+  if (opt.mirror.checked) {
+    rctx.setTransform(-1, 0, 0, 1, W, 0);
+  }
+  rctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
+
+  // цветной развод по краям: два смещённых слоя поверх основного
+  const split = p.split * (0.35 + k);
+  if (split > 0.5) {
+    rctx.globalCompositeOperation = 'lighter';
+    rctx.globalAlpha = 0.22 + k * 0.18;
+    rctx.filter = `${p.filter} hue-rotate(120deg)`;
+    rctx.drawImage(video, sx, sy, sw, sh, -split, 0, W, H);
+    rctx.filter = `${p.filter} hue-rotate(-120deg)`;
+    rctx.drawImage(video, sx, sy, sw, sh, split, 0, W, H);
+  }
+
+  rctx.setTransform(1, 0, 0, 1, 0, 0);
+  rctx.filter = 'none';
+  rctx.globalCompositeOperation = 'source-over';
+  rctx.globalAlpha = 1;
+
+  if (p.grain > 0) {
+    rctx.globalAlpha = p.grain;
+    rctx.globalCompositeOperation = 'overlay';
+    const gx = -Math.random() * 200, gy = -Math.random() * 200;
+    for (let x = gx; x < W; x += 220) {
+      for (let y = gy; y < H; y += 220) rctx.drawImage(grainCanvas, x, y);
+    }
+    rctx.globalCompositeOperation = 'source-over';
+    rctx.globalAlpha = 1;
+  }
+
+  if (p.vignette > 0) {
+    const g = rctx.createRadialGradient(W / 2, H / 2, H * 0.28, W / 2, H / 2, H * 0.72);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, `rgba(0,0,0,${p.vignette})`);
+    rctx.fillStyle = g;
+    rctx.fillRect(0, 0, W, H);
+  }
+
+  if (k > 0.02 && p.flash > 0) {
+    rctx.fillStyle = `rgba(255,255,255,${p.flash * k})`;
+    rctx.fillRect(0, 0, W, H);
+  }
+  return { W, H };
+}
+
+// --- запись ----------------------------------------------------------------
+function pickMime() {
+  const want = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
+  return want.find(t => window.MediaRecorder?.isTypeSupported?.(t)) || '';
+}
+
+function startEditRec() {
+  if (edit.recorder) return stopEditRec();
+  if (!window.MediaRecorder) { say('браузер не умеет запись'); return; }
+  renderEdit(performance.now());                 // холст должен быть готов до захвата
+  const stream = renderCanvas.captureStream(30);
+  if (musicDest) for (const t of musicDest.stream.getAudioTracks()) stream.addTrack(t);
+  const mime = pickMime();
+  try {
+    edit.recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8e6 } : undefined);
+  } catch (e) {
+    say(`запись не пошла: ${e.message}`);
+    return;
+  }
+  edit.chunks = [];
+  edit.recorder.ondataavailable = e => { if (e.data.size) edit.chunks.push(e.data); };
+  edit.recorder.onstop = finishEditRec;
+  edit.recorder.start(500);
+  edit.stopAt = performance.now() + parseFloat(opt.editSec.value) * 1000;
+  if (musicEl?.src) { musicEl.currentTime = 0; musicEl.play().catch(() => {}); }
+  editRecBtn.textContent = 'Стоп';
+  counterEl.classList.add('rec');
+  say('пишу, работай на камеру');
+}
+
+function stopEditRec() {
+  if (!edit.recorder) return;
+  try { edit.recorder.stop(); } catch { /* уже остановлен */ }
+  edit.recorder = null;
+  edit.stopAt = 0;
+  musicEl?.pause();
+  editRecBtn.textContent = 'Записать эдит';
+  counterEl.classList.remove('rec');
+}
+
+function finishEditRec() {
+  const blob = new Blob(edit.chunks, { type: 'video/webm' });
+  edit.chunks = [];
+  if (edit.url) URL.revokeObjectURL(edit.url);
+  edit.url = URL.createObjectURL(blob);
+  editSaveEl.href = edit.url;
+  editSaveEl.download = `edit-${edit.preset}-${Date.now()}.webm`;
+  editSaveEl.hidden = false;
+  editSaveEl.textContent = `Скачать ролик (${(blob.size / 1048576).toFixed(1)} МБ)`;
+  say('готово, ролик можно скачать');
+  osdSay('Эдит готов');
+}
+
+// --- цикл режима -----------------------------------------------------------
+function runEdit(drawing) {
+  if (!faceLandmarker) { loadFace(); return; }
+  const now = performance.now();
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const res = faceLandmarker.detectForVideo(video, now);
+    const box = faceBox(res);
+    if (box) {
+      // рамку сглаживаем, иначе кадр дёргается на каждом кадре модели
+      edit.face = edit.face
+        ? { cx: edit.face.cx * 0.8 + box.cx * 0.2, cy: edit.face.cy * 0.8 + box.cy * 0.2,
+            w: edit.face.w * 0.8 + box.w * 0.2, h: edit.face.h * 0.8 + box.h * 0.2 }
+        : box;
+    }
+  }
+
+  if (detectBeat(now)) edit.pulse = 1;
+  edit.pulse *= 0.86;                             // затухание удара
+  if (edit.pulse < 0.01) edit.pulse = 0;
+
+  const { W, H } = renderEdit(now);
+
+  if (drawing) {
+    // показываем результат как есть, вписывая его в холст страницы
+    const scale = Math.min(canvas.width / W, canvas.height / H);
+    const dw = W * scale, dh = H * scale;
+    ctx.fillStyle = '#07080c';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(renderCanvas, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+  }
+
+  if (edit.recorder && now > edit.stopAt) stopEditRec();
+
+  const left = edit.recorder ? Math.ceil((edit.stopAt - now) / 1000) : 0;
+  repsEl.textContent = edit.recorder ? String(left) : String(edit.beats);
+  repsLeftEl.textContent = edit.face ? 'лицо' : 'нет лица';
+  repsRightEl.textContent = `${edit.beats} битов`;
+  if (performance.now() > curl.noteUntil) {
+    curl.note = edit.recorder ? 'идёт запись' : (musicEl?.src ? 'трек заряжен' : 'можно без музыки');
+  }
+  phaseEl.textContent = curl.note;
+  handsEl.textContent = edit.face ? 'лицо в кадре' : 'лица нет';
+  gestEl.textContent = `${PRESETS[edit.preset].name} · ${edit.beats}`;
+  lastHandAt = now;
+}
+
 // --- главный цикл ----------------------------------------------------------
 let mode = 'gestures';
 let lastHandAt = 0;
@@ -1531,6 +1860,7 @@ function loop() {
   if (mode === 'laid') { runLaid(drawing); tickFps(); return; }
   if (mode === 'posture') { runPosture(drawing); tickFps(); return; }
   if (mode === 'guard') { runGuard(drawing); tickFps(); return; }
+  if (mode === 'edit') { runEdit(drawing); tickFps(); return; }
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -1605,6 +1935,7 @@ compactBtn.addEventListener('click', async () => {
 const modeBtns = Array.from(document.querySelectorAll('.mode'));
 const MODE_NAMES = {
   gestures: 'режим жестов',
+  edit: 'генератор эдитов',
   laid: 'режим Дэвида Лэйда',
   posture: 'режим осанки',
   guard: 'режим охраны',
@@ -1613,7 +1944,7 @@ const MODE_NAMES = {
 async function setMode(next) {
   if (mode === next) return;
   mode = next;
-  for (const name of ['laid', 'posture', 'guard']) {
+  for (const name of ['laid', 'posture', 'guard', 'edit']) {
     document.body.classList.toggle(`mode-${name}`, mode === name);
   }
   counterEl.hidden = mode === 'gestures';
@@ -1629,6 +1960,21 @@ async function setMode(next) {
   mouseRelease();                           // вне жестов мышь не нужна
   resetSwipe();
   if (mode !== 'laid') stopMedia();
+
+  if (mode !== 'edit') stopEditRec();
+
+  if (mode === 'edit') {
+    curl.note = 'гружу модель лица…';
+    paintCounter();
+    try {
+      await loadFace();
+      curl.note = 'выбери пресет и жми запись';
+    } catch (e) {
+      curl.note = `лицо не загрузилось: ${e.message}`;
+    }
+    paintCounter();
+    return;
+  }
 
   if (mode === 'guard') {
     armGuard();
@@ -1653,6 +1999,23 @@ modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode))
 document.getElementById('resetReps').addEventListener('click', () => resetReps());
 document.getElementById('calibBtn').addEventListener('click', startCalibration);
 document.getElementById('postureCalib').addEventListener('click', startPostureCalib);
+
+for (const [key, p] of Object.entries(PRESETS)) {
+  const o = document.createElement('option');
+  o.value = key;
+  o.textContent = p.name;
+  editPresetSel.appendChild(o);
+}
+editPresetSel.value = edit.preset;
+editPresetSel.addEventListener('change', () => {
+  edit.preset = editPresetSel.value;
+  say(`пресет: ${PRESETS[edit.preset].name}`);
+});
+editRecBtn.addEventListener('click', () => (edit.recorder ? stopEditRec() : startEditRec()));
+editMusicEl.addEventListener('change', () => {
+  const f = editMusicEl.files?.[0];
+  if (f) loadMusic(f).catch(e => say(`трек не открылся: ${e.message}`));
+});
 
 for (const [key, ex] of Object.entries(EXERCISES)) {
   const o = document.createElement('option');

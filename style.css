@@ -176,3 +176,21 @@ body.mode-guard .gestures-only{display:none}
 
 .counter.bad .reps{color:#ff9d9d}
 .counter.warn .reps{color:#ffd166}
+
+body:not(.mode-edit) .edit-only{display:none}
+body.mode-edit .gestures-only{display:none}
+
+a.secondary{
+  display:block;width:100%;margin-top:10px;padding:10px;text-align:center;
+  border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  text-decoration:none;font-size:14px;font-weight:550;
+}
+a.secondary:hover{border-color:rgba(92,225,230,.5);color:var(--accent)}
+input[type=file]{
+  width:100%;font-size:12px;color:var(--muted);
+}
+input[type=file]::file-selector-button{
+  margin-right:8px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;
+  background:transparent;color:var(--txt);cursor:pointer;font-size:12px;
+}
+.counter.rec .reps{color:#ff6b6b}
