@@ -91,6 +91,7 @@ DEFAULT_CONFIG = {
     'laid': {
         'media': True,
         'mediaAfter': 3,            # столько чистых повторений до запуска плееров
+        'window': False,            # True — отдельные окна браузера вместо панелей
         'muteVideo': True,          # звук отдаём плейлисту, иначе всё смешается
         'video': 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
         'playlist': 'https://soundcloud.com/dewakii/sets/david-laid',

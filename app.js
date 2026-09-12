@@ -32,6 +32,7 @@ const cfg = {
   laid: {
     media: true,
     mediaAfter: 3,            // включаем не с первого движения, а когда подход пошёл
+    window: false,            // true — отдельные окна браузера вместо панелей по краям
     muteVideo: true,          // звук отдаём плейлисту, иначе всё смешается
     video: 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
     playlist: 'https://soundcloud.com/dewakii/sets/david-laid',
@@ -60,6 +61,7 @@ async function loadConfig() {
     console.warn('конфиг не прочитан, работаю на значениях по умолчанию', e);
   }
   if (opt.mouse) opt.mouse.checked = !!cfg.mouse.enabled;
+  if (opt.windows) opt.windows.checked = !!cfg.laid.window;
   if (cfg.mode === 'laid') setMode('laid');
 }
 
@@ -80,6 +82,7 @@ const opt = {
   mouse:    document.getElementById('optMouse'),
   grip:     document.getElementById('optGrip'),
   media:    document.getElementById('optMedia'),
+  windows:  document.getElementById('optWindows'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -884,9 +887,32 @@ function soundcloudEmbed(url) {
        + '&hide_related=true&show_comments=false&show_user=false&visual=false';
 }
 
-function startMedia() {
-  if (mediaOn || DAEMON || !opt.media.checked || !cfg.laid.media) return;
-  mediaOn = true;
+const popups = { video: null, audio: null };
+
+function openPopups() {
+  const sw = screen.availWidth, sh = screen.availHeight;
+  const vw = Math.min(760, Math.round(sw * 0.36));
+  const vh = Math.round(vw * 9 / 16) + 40;
+  const aw = Math.min(560, Math.round(sw * 0.28));
+  const ah = 320;
+  const geo = (w, h, left) => `popup=yes,noopener=no,width=${w},height=${h},`
+    + `left=${left},top=${Math.max(Math.round((sh - h) / 2), 0)}`;
+
+  popups.video = window.open(youtubeEmbed(cfg.laid.video), 'yeahtrack-video',
+                             geo(vw, vh, 8));
+  popups.audio = window.open(soundcloudEmbed(cfg.laid.playlist), 'yeahtrack-audio',
+                             geo(aw, ah, Math.max(sw - aw - 8, 0)));
+  return !!(popups.video && popups.audio);
+}
+
+function closePopups() {
+  for (const key of ['video', 'audio']) {
+    try { popups[key]?.close(); } catch { /* окно уже закрыли руками */ }
+    popups[key] = null;
+  }
+}
+
+function showPanels() {
   mediaLeft.hidden = false;
   mediaRight.hidden = false;
   panel.classList.add('hidden');           // панель настроек стоит ровно на плеере
@@ -895,9 +921,22 @@ function startMedia() {
   mediaAudio.src = soundcloudEmbed(cfg.laid.playlist);
 }
 
+function startMedia() {
+  if (mediaOn || DAEMON || !opt.media.checked || !cfg.laid.media) return;
+  mediaOn = true;
+  if (!opt.windows.checked) return showPanels();
+  // всплывающее окно без свежего клика браузер может не пустить
+  if (!openPopups()) {
+    closePopups();
+    showPanels();
+    toast('окна заблокированы, показал по краям', true);
+  }
+}
+
 function stopMedia() {
   if (!mediaOn) return;
   mediaOn = false;
+  closePopups();
   mediaLeft.hidden = true;
   mediaRight.hidden = true;
   mediaVideo.src = 'about:blank';                    // так плеер точно замолкает
@@ -1044,6 +1083,10 @@ document.querySelectorAll('.media-close')
     panel.classList.remove('hidden');
   }));
 opt.media.addEventListener('change', () => { if (!opt.media.checked) stopMedia(); });
+opt.windows.addEventListener('change', () => {
+  cfg.laid.window = opt.windows.checked;
+  stopMedia();                             // следующий подход откроет уже по-новому
+});
 
 opt.mouse.addEventListener('change', () => {
   cfg.mouse.enabled = opt.mouse.checked;
@@ -1065,6 +1108,8 @@ document.addEventListener('visibilitychange', () => {
   }
   hiddenSince = 0;
 });
+
+window.addEventListener('pagehide', closePopups);
 
 document.addEventListener('keydown', e => {
   if (e.key.toLowerCase() === 'h' || e.key === 'р') panel.classList.toggle('hidden');
