@@ -20,5 +20,12 @@
   "idle": {
     "afterSec": 5,
     "fps": 4
+  },
+
+  "laid": {
+    "media": true,
+    "muteVideo": true,
+    "video": "https://www.youtube.com/watch?v=M0HEVK6dlGI",
+    "playlist": "https://soundcloud.com/dewakii/sets/david-laid"
   }
 }

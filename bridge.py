@@ -88,6 +88,12 @@ DEFAULT_CONFIG = {
     },
     'mouse': {'enabled': False, 'gain': 1700, 'scrollGain': 1.0, 'smooth': 0.45},
     'idle': {'afterSec': 5, 'fps': 4},
+    'laid': {
+        'media': True,
+        'muteVideo': True,          # звук отдаём плейлисту, иначе всё смешается
+        'video': 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
+        'playlist': 'https://soundcloud.com/dewakii/sets/david-laid',
+    },
 }
 
 

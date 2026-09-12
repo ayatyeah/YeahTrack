@@ -29,6 +29,12 @@ const cfg = {
   },
   mouse: { enabled: false, gain: 1700, scrollGain: 1.0, smooth: 0.45 },
   idle: { afterSec: 5, fps: 4 },
+  laid: {
+    media: true,
+    muteVideo: true,          // звук отдаём плейлисту, иначе всё смешается
+    video: 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
+    playlist: 'https://soundcloud.com/dewakii/sets/david-laid',
+  },
 };
 
 const ACTION_LABELS = {
@@ -72,6 +78,7 @@ const opt = {
   snap:     document.getElementById('optSnap'),
   mouse:    document.getElementById('optMouse'),
   grip:     document.getElementById('optGrip'),
+  media:    document.getElementById('optMedia'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -80,6 +87,9 @@ const repsEl     = document.getElementById('reps');
 const repsLeftEl = document.getElementById('repsLeft');
 const repsRightEl= document.getElementById('repsRight');
 const phaseEl    = document.getElementById('phase');
+const mediaEl    = document.getElementById('media');
+const mediaVideo = document.getElementById('mediaVideo');
+const mediaAudio = document.getElementById('mediaAudio');
 
 // --- топология кисти -------------------------------------------------------
 const FINGERS = [
@@ -708,6 +718,7 @@ function countArm(side, pose) {
     if (angle < ANGLE_UP) {
       arm.phase = 'up';
       arm.peak = angle;
+      startMedia();                       // «начал поднимать» — включаем подход
     }
   } else {
     arm.peak = Math.min(arm.peak, angle);
@@ -751,6 +762,7 @@ function resetReps() {
   }
   curl.total = 0;
   curl.note = 'счёт обнулён';
+  stopMedia();
   paintCounter();
 }
 
@@ -850,6 +862,40 @@ function runLaid(drawing) {
   handsEl.textContent = `угол ${[angles.left, angles.right]
     .filter(a => a != null).map(a => Math.round(a) + '°').join(' / ') || '—'}`;
   gestEl.textContent = `подъёмов: ${curl.total}`;
+}
+
+// --- видео и музыка на время подхода ---------------------------------------
+let mediaOn = false;
+
+function youtubeEmbed(url) {
+  // принимаем и полную ссылку, и короткую youtu.be, и готовый id
+  const m = String(url).match(/(?:v=|youtu\.be\/|embed\/)([A-Za-z0-9_-]{6,})/);
+  const id = m ? m[1] : String(url);
+  const mute = opt.media && cfg.laid.muteVideo ? '&mute=1' : '';
+  return `https://www.youtube.com/embed/${id}?autoplay=1${mute}&playsinline=1&rel=0`;
+}
+
+function soundcloudEmbed(url) {
+  const q = encodeURIComponent(url);
+  return `https://w.soundcloud.com/player/?url=${q}&auto_play=true`
+       + '&hide_related=true&show_comments=false&show_user=false&visual=false';
+}
+
+function startMedia() {
+  if (mediaOn || DAEMON || !opt.media.checked || !cfg.laid.media) return;
+  mediaOn = true;
+  mediaEl.hidden = false;
+  // src ставим только сейчас: иначе плеер грузится и играет до начала подхода
+  mediaVideo.src = youtubeEmbed(cfg.laid.video);
+  mediaAudio.src = soundcloudEmbed(cfg.laid.playlist);
+}
+
+function stopMedia() {
+  if (!mediaOn) return;
+  mediaOn = false;
+  mediaEl.hidden = true;
+  mediaVideo.src = 'about:blank';                    // так плеер точно замолкает
+  mediaAudio.src = 'about:blank';
 }
 
 // --- главный цикл ----------------------------------------------------------
@@ -967,6 +1013,7 @@ async function setMode(next) {
   modeBtns.forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   lastVideoTime = -1;                       // модели считают кадры по времени
   if (mode !== 'laid') {
+    stopMedia();
     toast('режим жестов');
     return;
   }
@@ -985,6 +1032,8 @@ async function setMode(next) {
 
 modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 document.getElementById('resetReps').addEventListener('click', resetReps);
+document.getElementById('mediaClose').addEventListener('click', stopMedia);
+opt.media.addEventListener('change', () => { if (!opt.media.checked) stopMedia(); });
 
 opt.mouse.addEventListener('change', () => {
   cfg.mouse.enabled = opt.mouse.checked;

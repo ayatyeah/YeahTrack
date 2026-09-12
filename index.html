@@ -92,6 +92,10 @@
         <span>Строгая амплитуда</span>
         <input type="checkbox" id="optStrict" checked>
       </label>
+      <label class="row laid-only">
+        <span>Видео и музыка</span>
+        <input type="checkbox" id="optMedia" checked>
+      </label>
       <button id="resetReps" class="secondary laid-only">Обнулить счёт</button>
 
       <div class="sep">Вид</div>
@@ -112,6 +116,16 @@
       </div>
       <button id="startBtn">Включить камеру</button>
       <p class="hint">H — спрятать панель</p>
+    </div>
+
+    <div class="media" id="media" hidden>
+      <div class="media-head">
+        <span>Дэвид Лэйд</span>
+        <button id="mediaClose" title="Закрыть">×</button>
+      </div>
+      <iframe id="mediaVideo" title="видео" allow="autoplay; encrypted-media"
+              referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+      <iframe id="mediaAudio" title="плейлист" allow="autoplay"></iframe>
     </div>
 
     <div class="toast" id="toast"></div>
