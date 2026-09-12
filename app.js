@@ -34,6 +34,7 @@ const cfg = {
   guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
   wow: { gravity: 1400, bounce: 0.45 },
   tony: { model: 'reactor' },
+  xray: { panelH: 0.42, density: 1300 },
   edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true, fx: [] },
   laid: {
     media: true,
@@ -88,6 +89,8 @@ async function loadConfig() {
   if (typeof cfg.edit?.seconds === 'number') opt.editSec.value = String(cfg.edit.seconds);
   if (cfg.edit && cfg.edit.vertical === false) opt.vertical.checked = false;
   if (cfg.edit && cfg.edit.faceTrack === false) opt.faceTrack.checked = false;
+  if (typeof cfg.xray?.panelH === 'number') opt.panelH.value = String(cfg.xray.panelH);
+  if (typeof cfg.xray?.density === 'number') opt.density.value = String(cfg.xray.density);
   if (cfg.tony?.model && HOLOS[cfg.tony.model]) {
     tony.model = cfg.tony.model;
     holoSel.value = tony.model;
@@ -138,6 +141,10 @@ const opt = {
   hud:      document.getElementById('optHud'),
   telemetry: document.getElementById('optTelemetry'),
   spin:     document.getElementById('optSpin'),
+  panelH:   document.getElementById('optPanelH'),
+  density:  document.getElementById('optDensity'),
+  bones:    document.getElementById('optBones'),
+  outline:  document.getElementById('optOutline'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -162,6 +169,9 @@ const holoSel        = document.getElementById('holoSel');
 const holoScaleEl    = document.getElementById('holoScale');
 const tonyRecBtn     = document.getElementById('tonyRec');
 const tonySaveEl     = document.getElementById('tonySave');
+const xrayPtsEl      = document.getElementById('xrayPts');
+const xrayRecBtn     = document.getElementById('xrayRec');
+const xraySaveEl     = document.getElementById('xraySave');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -2255,7 +2265,8 @@ function finishEditRec() {
   edit.url = URL.createObjectURL(blob);
   const link = edit.recLink || editSaveEl;
   link.href = edit.url;
-  const tag = link === wowSaveEl ? 'wow' : link === tonySaveEl ? 'tony' : `edit-${edit.preset}`;
+  const tag = link === wowSaveEl ? 'wow' : link === tonySaveEl ? 'tony'
+            : link === xraySaveEl ? 'xray' : `edit-${edit.preset}`;
   link.download = `${tag}-${Date.now()}.webm`;
   link.hidden = false;
   link.textContent = `Скачать ролик (${(blob.size / 1048576).toFixed(1)} МБ)`;
@@ -3118,6 +3129,277 @@ function resetTony() {
   tony.hint = 'собрано';
 }
 
+// --- режим рентгена --------------------------------------------------------
+// Между двумя открытыми ладонями висит рамка. Всё, что попадает внутрь,
+// рисуется иначе: силуэт светится контуром, внутри облако точек и кости.
+// Содержимое привязано к телу, а не к рамке: рамка только «окно».
+const BONES = [
+  [11, 12], [11, 23], [12, 24], [23, 24],          // корпус
+  [11, 13], [13, 15], [12, 14], [14, 16],          // руки
+  [23, 25], [25, 27], [24, 26], [26, 28],          // ноги
+];
+
+const edgeCanvas = document.createElement('canvas');
+const ectx = edgeCanvas.getContext('2d');
+
+const xray = {
+  pts: [],            // облако в нормализованных координатах
+  builtAt: 0,
+  hint: 'подними две открытые ладони',
+  lastAt: 0,
+  scan: 0,
+};
+
+// Облако точек пересобираем не каждый кадр: маска меняется медленнее,
+// а пересборка стоит чтения всей маски.
+function buildXrayCloud(pose) {
+  if (!maskReady) return;
+  const mw = maskCanvas.width, mh = maskCanvas.height;
+  const data = mctx.getImageData(0, 0, mw, mh).data;
+  const want = parseInt(opt.density.value, 10);
+  const head = pose?.[0] ? { x: pose[0].x, y: pose[0].y } : null;
+
+  // Кандидатов берём по каждому пикселю маски: иначе ползунок плотности
+  // упирается в потолок задолго до максимума.
+  const body = [];
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      if (data[(y * mw + x) * 4 + 3] > 0) body.push([x / mw, y / mh]);
+    }
+  }
+  if (!body.length) { xray.pts = []; return; }
+
+  // Дробный накопитель вместо целого шага: иначе число точек перескакивает
+  // мимо запрошенного на десятки процентов.
+  const keep = Math.min(want / body.length, 1);
+  const pts = [];
+  let acc = 0;
+  for (const [u, v] of body) {
+    acc += keep;
+    if (acc < 1) continue;
+    acc -= 1;
+    // ближе к голове — горячее: красный и оранжевый, по краям синий
+    const d = head ? Math.hypot(u - head.x, v - head.y) : 0.5;
+    let hue = 205, warm = 0;
+    if (d < 0.12) { hue = 18 + Math.random() * 26; warm = 1; }
+    else if (d < 0.26) { hue = 330 + Math.random() * 25; warm = 0.7; }
+    else if (Math.random() < 0.25) { hue = 340; warm = 0.4; }
+    pts.push({ u, v, hue, warm, r: Math.random() < 0.08 ? 2.4 : 1.4,
+               ph: Math.random() * Math.PI * 2 });
+  }
+  xray.pts = pts;
+  xray.builtAt = performance.now();
+}
+
+// Контур силуэта: рисуем маску с четырёх сдвигов и вычитаем её же по центру.
+function drawSilhouetteEdge(target) {
+  if (!maskReady) return;
+  const W = view.W, H = view.H;
+  if (edgeCanvas.width !== W) { edgeCanvas.width = W; edgeCanvas.height = H; }
+  ectx.setTransform(1, 0, 0, 1, 0, 0);
+  ectx.clearRect(0, 0, W, H);
+  const k = Math.max(Math.round(W / 260), 2);
+  for (const [dx, dy] of [[k, 0], [-k, 0], [0, k], [0, -k]]) {
+    ectx.save();
+    ectx.translate(dx, dy);
+    drawAligned(ectx, maskCanvas, maskCanvas.width, maskCanvas.height);
+    ectx.restore();
+  }
+  ectx.globalCompositeOperation = 'destination-out';
+  drawAligned(ectx, maskCanvas, maskCanvas.width, maskCanvas.height);
+  ectx.globalCompositeOperation = 'source-in';
+  ectx.fillStyle = 'rgba(120,215,255,.95)';
+  ectx.fillRect(0, 0, W, H);
+  ectx.globalCompositeOperation = 'source-over';
+
+  target.save();
+  target.globalCompositeOperation = 'lighter';
+  target.shadowColor = '#7fd8ff';
+  target.shadowBlur = 26;
+  target.drawImage(edgeCanvas, 0, 0);
+  target.drawImage(edgeCanvas, 0, 0);      // второй проход, чтобы контур горел
+  target.restore();
+}
+
+function drawXrayInside(pose, now, W, H) {
+  // тёмная подложка: сквозь рамку видно «другой мир»
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(2,8,16,.93)');
+  g.addColorStop(1, 'rgba(1,4,10,.97)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  if (opt.outline.checked) drawSilhouetteEdge(ctx);
+
+  // облако точек внутри тела
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const p of xray.pts) {
+    const puls = 0.55 + 0.45 * Math.sin(now / 320 + p.ph);
+    const x = vx(p.u) + Math.sin(now / 260 + p.ph) * 1.6;
+    const y = vy(p.v) + Math.cos(now / 300 + p.ph) * 1.6;
+    const a = (0.35 + p.warm * 0.5) * puls;
+    ctx.fillStyle = p.hue === 340 && p.warm === 0.4
+      ? `rgba(255,255,255,${a})`
+      : `hsla(${p.hue}, 100%, ${58 + p.warm * 18}%, ${a})`;
+    const s = p.r * (0.7 + puls * 0.6);
+    ctx.fillRect(x - s / 2, y - s / 2, s, s);
+  }
+  ctx.restore();
+
+  if (!pose) return;
+
+  // кости поверх облака
+  if (opt.bones.checked) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = 'rgba(215,245,255,.75)';
+    ctx.lineWidth = Math.max(W / 520, 1.6);
+    ctx.shadowColor = '#bfefff';
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    for (const [a, b] of BONES) {
+      if (!visible(pose[a]) || !visible(pose[b])) continue;
+      ctx.moveTo(vx(pose[a].x), vy(pose[a].y));
+      ctx.lineTo(vx(pose[b].x), vy(pose[b].y));
+    }
+    // позвоночник: от середины плеч к середине бёдер
+    if (visible(pose[11]) && visible(pose[12]) && visible(pose[23]) && visible(pose[24])) {
+      ctx.moveTo(vx((pose[11].x + pose[12].x) / 2), vy((pose[11].y + pose[12].y) / 2));
+      ctx.lineTo(vx((pose[23].x + pose[24].x) / 2), vy((pose[23].y + pose[24].y) / 2));
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // череп: ореол вокруг головы, как на рентгене
+  if (visible(pose[0])) {
+    const hx = vx(pose[0].x), hy = vy(pose[0].y);
+    const rr = Math.hypot(vx(pose[7]?.x ?? pose[0].x) - hx, 0) || W * 0.05;
+    const r = Math.max(rr * 1.6, W * 0.045);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 1; i <= 3; i++) {
+      ctx.strokeStyle = `rgba(140,225,255,${0.32 / i})`;
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.arc(hx, hy, r * (0.8 + i * 0.28 + Math.sin(now / 700 + i) * 0.05), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+function drawPanelFrame(cxp, cyp, w, h, ang) {
+  ctx.save();
+  ctx.translate(cxp, cyp);
+  ctx.rotate(ang);
+  ctx.globalCompositeOperation = 'lighter';
+
+  ctx.strokeStyle = 'rgba(60,150,255,.95)';
+  ctx.lineWidth = Math.max(w / 90, 5);
+  ctx.shadowColor = '#3c96ff';
+  ctx.shadowBlur = 34;
+  ctx.strokeRect(-w / 2, -h / 2, w, h);
+
+  ctx.shadowBlur = 0;
+  const c = Math.max(w * 0.035, 14);
+  const marks = [[-1, -1, '#49e0c8'], [1, -1, '#ff77a8'],
+                 [-1, 1, '#ff77a8'], [1, 1, '#49e0c8']];
+  for (const [sx, sy, col] of marks) {
+    ctx.fillStyle = col;
+    ctx.fillRect(sx * w / 2 - (sx > 0 ? c : 0), sy * h / 2 - (sy > 0 ? c : 0), c, c);
+  }
+  ctx.restore();
+}
+
+function runXray(drawing) {
+  const now = performance.now();
+  xray.lastAt = now;
+
+  if (!landmarker || video.readyState < 2 || !syncCanvas()) return;
+  const W = canvas.width, H = canvas.height;
+  const vw = video.videoWidth || 640, vh = video.videoHeight || 480;
+  Object.assign(view, { sx: 0, sy: 0, sw: vw, sh: vh, W, H, vw, vh, mirror: opt.mirror.checked });
+
+  ctx.clearRect(0, 0, W, H);
+  video.classList.toggle('hidden', !opt.video.checked);
+  video.style.transform = opt.mirror.checked
+    ? 'translate(-50%,-50%) scaleX(-1)'
+    : 'translate(-50%,-50%)';
+  if (!opt.video.checked) {
+    ctx.fillStyle = '#07080c';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    window.__last = landmarker.detectForVideo(video, now);
+    if (poseLandmarker) lastPose = poseLandmarker.detectForVideo(video, now + 0.3);
+    else loadPose();
+    if (segmenter) updateMask(segmenter.segmentForVideo(video, now + 0.6));
+    else loadSeg();
+  }
+
+  const hands = window.__last?.landmarks ?? [];
+  const pose = lastPose?.landmarks?.[0] ?? null;
+  const px = lm => [(opt.mirror.checked ? 1 - lm.x : lm.x) * W, lm.y * H];
+
+  // рамку держат две открытые ладони
+  const palms = [];
+  for (const lms of hands) {
+    const g = gestureOf(lms);
+    if (g.pose === 'palm' || g.ext.filter(Boolean).length >= 3) palms.push(px(lms[9]));
+  }
+
+  if (now - xray.builtAt > 250) buildXrayCloud(pose);
+
+  if (palms.length >= 2 && drawing) {
+    const [a, b] = palms.sort((p, q) => p[0] - q[0]);
+    const w = Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.98;
+    const h = w * parseFloat(opt.panelH.value);
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    const cxp = (a[0] + b[0]) / 2, cyp = (a[1] + b[1]) / 2;
+
+    // Клип задаём в повёрнутых координатах, а содержимое рисуем в обычных:
+    // область отсечения остаётся на месте после сброса преобразования.
+    ctx.save();
+    ctx.translate(cxp, cyp);
+    ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.rect(-w / 2, -h / 2, w, h);
+    ctx.clip();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawXrayInside(pose, now, W, H);
+
+    // сканирующая полоса внутри рамки
+    xray.scan = (xray.scan + 0.006) % 1;
+    const sg = ctx.createLinearGradient(0, 0, 0, H);
+    const sy = xray.scan;
+    sg.addColorStop(Math.max(sy - 0.06, 0), 'rgba(90,200,255,0)');
+    sg.addColorStop(sy, 'rgba(90,200,255,.16)');
+    sg.addColorStop(Math.min(sy + 0.06, 1), 'rgba(90,200,255,0)');
+    ctx.fillStyle = sg;
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    drawPanelFrame(cxp, cyp, w, h, ang);
+    xray.hint = 'просвечиваю';
+  } else {
+    xray.hint = palms.length === 1 ? 'нужна вторая ладонь'
+                                   : 'подними две открытые ладони';
+  }
+
+  xrayPtsEl.textContent = String(xray.pts.length);
+  repsEl.textContent = String(palms.length);
+  repsLeftEl.textContent = pose ? 'скелет' : 'нет скелета';
+  repsRightEl.textContent = maskReady ? 'силуэт' : 'нет силуэта';
+  phaseEl.textContent = xray.hint;
+  handsEl.textContent = `ладоней ${palms.length}`;
+  gestEl.textContent = `рентген · ${xray.pts.length}`;
+  lastHandAt = now;
+}
+
 // --- главный цикл ----------------------------------------------------------
 let mode = 'gestures';
 let lastHandAt = 0;
@@ -3158,6 +3440,7 @@ function loop() {
   if (mode === 'edit') { runEdit(drawing); tickFps(); return; }
   if (mode === 'wow') { runWow(drawing); tickFps(); return; }
   if (mode === 'tony') { runTony(drawing); tickFps(); return; }
+  if (mode === 'xray') { runXray(drawing); tickFps(); return; }
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -3235,6 +3518,7 @@ const MODE_NAMES = {
   edit: 'генератор эдитов',
   wow: 'вау-режим',
   tony: 'режим Тони',
+  xray: 'рентген',
   laid: 'режим Дэвида Лэйда',
   posture: 'режим осанки',
   guard: 'режим охраны',
@@ -3243,7 +3527,7 @@ const MODE_NAMES = {
 async function setMode(next) {
   if (mode === next) return;
   mode = next;
-  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow', 'tony']) {
+  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow', 'tony', 'xray']) {
     document.body.classList.toggle(`mode-${name}`, mode === name);
   }
   counterEl.hidden = mode === 'gestures';
@@ -3260,7 +3544,20 @@ async function setMode(next) {
   resetSwipe();
   if (mode !== 'laid') stopMedia();
 
-  if (mode !== 'edit' && mode !== 'wow' && mode !== 'tony') stopEditRec();
+  if (!['edit', 'wow', 'tony', 'xray'].includes(mode)) stopEditRec();
+
+  if (mode === 'xray') {
+    xray.pts = [];
+    xray.builtAt = 0;
+    say('гружу скелет и силуэт…');
+    try {
+      await Promise.all([loadPose(), loadSeg()]);
+      say('подними две открытые ладони');
+    } catch (e) {
+      say(`не загрузилось: ${e.message}`);
+    }
+    return;
+  }
 
   if (mode === 'tony') {
     tony.lastAt = 0;
@@ -3354,6 +3651,9 @@ document.getElementById('tonyReset').addEventListener('click', resetTony);
 tonyRecBtn.addEventListener('click', () => (edit.recorder
   ? stopEditRec()
   : startEditRec(canvas, tonyRecBtn, tonySaveEl)));
+xrayRecBtn.addEventListener('click', () => (edit.recorder
+  ? stopEditRec()
+  : startEditRec(canvas, xrayRecBtn, xraySaveEl)));
 
 for (const [key, m] of Object.entries(HOLOS)) {
   const o = document.createElement('option');

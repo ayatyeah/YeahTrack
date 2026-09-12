@@ -39,6 +39,7 @@
         <button class="mode" id="modeEdit" data-mode="edit">Генератор эдитов</button>
         <button class="mode" id="modeWow" data-mode="wow">Вау-режим</button>
         <button class="mode" id="modeTony" data-mode="tony">Режим Тони</button>
+        <button class="mode" id="modeXray" data-mode="xray">Рентген</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -229,6 +230,29 @@
       <p class="hint tony-only">Щепоть одной рукой вращает, двумя — масштаб
       и наклон. Развёл открытые ладони — разлёт на слои. Кулак собирает.
       Щелчок меняет объект.</p>
+
+      <div class="sep xray-only">Рентген</div>
+      <label class="row xray-only">
+        <span>Высота рамки</span>
+        <input type="range" id="optPanelH" min="0.2" max="0.9" step="0.02" value="0.42">
+      </label>
+      <label class="row xray-only">
+        <span>Плотность точек</span>
+        <input type="range" id="optDensity" min="200" max="2600" step="100" value="1300">
+      </label>
+      <label class="row xray-only">
+        <span>Кости</span>
+        <input type="checkbox" id="optBones" checked>
+      </label>
+      <label class="row xray-only">
+        <span>Контур тела</span>
+        <input type="checkbox" id="optOutline" checked>
+      </label>
+      <div class="row xray-only"><span>Точек</span><b id="xrayPts">0</b></div>
+      <button id="xrayRec" class="xray-only">Записать</button>
+      <a id="xraySave" class="secondary xray-only" hidden download>Скачать ролик</a>
+      <p class="hint xray-only">Подними две открытые ладони: между ними
+      появится рамка, и внутри тело просветится.</p>
 
       <div class="sep">Вид</div>
       <label class="row">

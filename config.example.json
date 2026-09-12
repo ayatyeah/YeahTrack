@@ -48,6 +48,11 @@
     "model": "reactor"
   },
 
+  "xray": {
+    "panelH": 0.42,
+    "density": 1300
+  },
+
   "guard": {
     "armSec": 15,
     "sensitivity": 12,

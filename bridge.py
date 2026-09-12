@@ -119,6 +119,10 @@ DEFAULT_CONFIG = {
     'tony': {
         'model': 'reactor',     # reactor, globe, core
     },
+    'xray': {
+        'panelH': 0.42,         # высота рамки в долях её ширины
+        'density': 1300,        # сколько точек в облаке
+    },
     'guard': {
         'armSec': 15,           # столько на то, чтобы уйти из кадра
         'sensitivity': 12,      # порог различия кадров, меньше — чувствительнее

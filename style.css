@@ -200,3 +200,6 @@ body.mode-wow .gestures-only{display:none}
 
 body:not(.mode-tony) .tony-only{display:none}
 body.mode-tony .gestures-only{display:none}
+
+body:not(.mode-xray) .xray-only{display:none}
+body.mode-xray .gestures-only{display:none}
