@@ -1,4 +1,4 @@
-import { FilesetResolver, HandLandmarker, PoseLandmarker, FaceLandmarker }
+import { FilesetResolver, HandLandmarker, PoseLandmarker, FaceLandmarker, ImageSegmenter }
   from './vendor/vision_bundle.mjs';
 
 const video   = document.getElementById('video');
@@ -32,7 +32,7 @@ const cfg = {
   idle: { afterSec: 5, fps: 4 },
   posture: { fps: 3, slouch: 0.12, tiltDeg: 8, holdSec: 8, cooldownSec: 600, voice: false },
   guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
-  edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true },
+  edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true, fx: [] },
   laid: {
     media: true,
     mediaAfter: 0,            // 0 — по первому сгибанию, иначе столько зачтённых повторений
@@ -86,6 +86,12 @@ async function loadConfig() {
   if (typeof cfg.edit?.seconds === 'number') opt.editSec.value = String(cfg.edit.seconds);
   if (cfg.edit && cfg.edit.vertical === false) opt.vertical.checked = false;
   if (cfg.edit && cfg.edit.faceTrack === false) opt.faceTrack.checked = false;
+  for (const key of cfg.edit?.fx ?? []) {
+    if (!FX[key]) continue;
+    fxOn.add(key);
+    if (FX[key].box) FX[key].box.checked = true;
+    if (FX[key].needs.includes('seg')) loadSeg().catch(() => {});
+  }
   if (cfg.mode && cfg.mode !== 'gestures') setMode(cfg.mode);
 }
 
@@ -1541,6 +1547,9 @@ const edit = {
 
 let faceLandmarker = null;
 let faceLoading = null;
+let lastFace = null;
+let lastFxHands = [];
+let fxLastAt = 0;
 let audioCtx = null, analyser = null, musicEl = null, musicDest = null, freqData = null;
 
 const renderCanvas = document.createElement('canvas');
@@ -1569,6 +1578,7 @@ function loadFace() {
       baseOptions: { modelAssetPath: './models/face_landmarker.task', delegate },
       runningMode: 'VIDEO',
       numFaces: 1,
+      outputFaceBlendshapes: true,        // мимика: рот, брови, моргание
     });
     try {
       faceLandmarker = await make(DAEMON ? 'CPU' : 'GPU');
@@ -1671,18 +1681,44 @@ function renderEdit(now) {
   const sx = crop.x + (crop.w - sw) / 2 + (Math.random() - 0.5) * jitter;
   const sy = crop.y + (crop.h - sh) / 2 + (Math.random() - 0.5) * jitter;
 
+  Object.assign(view, { sx, sy, sw, sh, W, H, vw, vh, mirror: opt.mirror.checked });
+
   rctx.setTransform(1, 0, 0, 1, 0, 0);
   rctx.globalAlpha = 1;
   rctx.globalCompositeOperation = 'source-over';
-  rctx.filter = p.filter;
-  if (opt.mirror.checked) {
-    rctx.setTransform(-1, 0, 0, 1, W, 0);
+  rctx.filter = 'none';
+
+  const person = (fxOn.has('matrix') || fxOn.has('dust')) ? cutPerson() : null;
+  const dustK = dustEnvelope(now);
+
+  if (fxOn.has('matrix') && maskReady) {
+    // фон в чёрный, тело — падающий код
+    rctx.fillStyle = '#000';
+    rctx.fillRect(0, 0, W, H);
+    if (fxOn.has('echo')) drawEcho(rctx);
+    rctx.globalAlpha = 0.25;
+    if (person) rctx.drawImage(person, 0, 0);
+    rctx.globalAlpha = 1;
+    drawMatrix(rctx);
+  } else {
+    if (fxOn.has('echo')) {
+      rctx.fillStyle = '#07080c';
+      rctx.fillRect(0, 0, W, H);
+      drawEcho(rctx);
+    }
+    rctx.filter = p.filter;
+    rctx.save();
+    if (opt.mirror.checked) rctx.setTransform(-1, 0, 0, 1, W, 0);
+    // на рассыпании тело растворяется, его заменяют частицы
+    rctx.globalAlpha = fxOn.has('dust') ? 1 - dustK * 0.92 : 1;
+    rctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
+    rctx.restore();
+    rctx.globalAlpha = 1;
   }
-  rctx.drawImage(video, sx, sy, sw, sh, 0, 0, W, H);
 
   // цветной развод по краям: два смещённых слоя поверх основного
   const split = p.split * (0.35 + k);
-  if (split > 0.5) {
+  if (split > 0.5 && !fxOn.has('matrix')) {
     rctx.globalCompositeOperation = 'lighter';
     rctx.globalAlpha = 0.22 + k * 0.18;
     rctx.filter = `${p.filter} hue-rotate(120deg)`;
@@ -1695,6 +1731,16 @@ function renderEdit(now) {
   rctx.filter = 'none';
   rctx.globalCompositeOperation = 'source-over';
   rctx.globalAlpha = 1;
+
+  // порядок важен: сначала мир вокруг, потом руки, лицо и частицы поверх
+  if (fxOn.has('echo')) pushEcho(person || renderCanvas);
+  if (fxOn.size) {
+    if (fxOn.has('faceMask') && lastFace) faceEffects(rctx, lastFace, now);
+    if (fxOn.has('sparks') || fxOn.has('lightning')) handEffects(rctx, lastFxHands, now);
+    stepParticles(Math.min(now - (fxLastAt || now), 60));
+    fxLastAt = now;
+    drawParticles(rctx);
+  }
 
   if (p.grain > 0) {
     rctx.globalAlpha = p.grain;
@@ -1720,6 +1766,417 @@ function renderEdit(now) {
     rctx.fillRect(0, 0, W, H);
   }
   return { W, H };
+}
+
+// --- эффекты эдита ---------------------------------------------------------
+// Каждый эффект — отдельный слой. Модели грузим только те, что нужны
+// включённым слоям: лишняя сегментация или лицо стоят кадров.
+const FX = {
+  echo:      { name: 'Эхо-двойники',        needs: [] },
+  matrix:    { name: 'Матрица по силуэту',  needs: ['seg'] },
+  dust:      { name: 'Рассыпание в пыль',   needs: ['seg'] },
+  sparks:    { name: 'Искры с рук',         needs: ['hands'] },
+  lightning: { name: 'Молния между ладоней', needs: ['hands'] },
+  faceMask:  { name: 'Маска по лицу',       needs: ['face'] },
+};
+const fxOn = new Set();
+
+let segmenter = null, segLoading = null;
+let maskReady = false;
+const maskCanvas = document.createElement('canvas');
+const mctx = maskCanvas.getContext('2d');
+const personCanvas = document.createElement('canvas');
+const pctx = personCanvas.getContext('2d');
+const fxCanvas = document.createElement('canvas');
+const fctx = fxCanvas.getContext('2d');
+
+// система координат кадра: из нормализованных координат модели в пиксели холста
+const view = { sx: 0, sy: 0, sw: 1, sh: 1, W: 1, H: 1, vw: 1, vh: 1, mirror: false };
+function vx(u) {
+  const x = (u * view.vw - view.sx) / view.sw * view.W;
+  return view.mirror ? view.W - x : x;
+}
+const vy = v => (v * view.vh - view.sy) / view.sh * view.H;
+
+function loadSeg() {
+  if (segmenter) return Promise.resolve(segmenter);
+  if (segLoading) return segLoading;
+  segLoading = (async () => {
+    const fileset = await FilesetResolver.forVisionTasks('./vendor/wasm');
+    const make = delegate => ImageSegmenter.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: './models/selfie_segmenter.tflite', delegate },
+      runningMode: 'VIDEO',
+      outputCategoryMask: true,
+      outputConfidenceMasks: false,
+    });
+    try {
+      segmenter = await make(DAEMON ? 'CPU' : 'GPU');
+    } catch (e) {
+      console.warn('силуэт на GPU не пошёл, беру CPU', e);
+      segmenter = await make('CPU');
+    }
+    return segmenter;
+  })();
+  return segLoading;
+}
+
+// маска приходит в разрешении модели: раскладываем её в альфу отдельного холста
+function updateMask(result) {
+  const m = result?.categoryMask;
+  if (!m) return;
+  const mw = m.width, mh = m.height;
+  const data = m.getAsUint8Array();
+  if (maskCanvas.width !== mw) { maskCanvas.width = mw; maskCanvas.height = mh; }
+  const img = mctx.createImageData(mw, mh);
+  for (let i = 0, j = 0; i < data.length; i++, j += 4) {
+    const person = data[i] > 0 ? 255 : 0;
+    img.data[j] = img.data[j + 1] = img.data[j + 2] = 255;
+    img.data[j + 3] = person;
+  }
+  mctx.putImageData(img, 0, 0);
+  maskReady = true;
+  m.close?.();
+}
+
+// маска и кадр обрезаны одинаково, иначе силуэт разъедется с картинкой
+function drawAligned(target, source, w, h) {
+  const mx = view.sx / view.vw * w, my = view.sy / view.vh * h;
+  const mw = view.sw / view.vw * w, mh = view.sh / view.vh * h;
+  target.save();
+  if (view.mirror) target.setTransform(-1, 0, 0, 1, view.W, 0);
+  target.drawImage(source, mx, my, mw, mh, 0, 0, view.W, view.H);
+  target.restore();
+}
+
+// вырезаем человека из кадра по маске
+function cutPerson() {
+  if (!maskReady) return null;
+  if (personCanvas.width !== view.W) {
+    personCanvas.width = view.W; personCanvas.height = view.H;
+  }
+  pctx.setTransform(1, 0, 0, 1, 0, 0);
+  pctx.clearRect(0, 0, view.W, view.H);
+  pctx.save();
+  if (view.mirror) pctx.setTransform(-1, 0, 0, 1, view.W, 0);
+  pctx.drawImage(video, view.sx, view.sy, view.sw, view.sh, 0, 0, view.W, view.H);
+  pctx.restore();
+  pctx.globalCompositeOperation = 'destination-in';
+  drawAligned(pctx, maskCanvas, maskCanvas.width, maskCanvas.height);
+  pctx.globalCompositeOperation = 'source-over';
+  return personCanvas;
+}
+
+// --- частицы ---------------------------------------------------------------
+const MAX_PARTS = 6000;
+const parts = [];
+
+function spawn(x, y, vxp, vyp, opts = {}) {
+  if (parts.length >= MAX_PARTS) return;
+  parts.push({
+    x, y, ox: x, oy: y, vx: vxp, vy: vyp,
+    life: 0, max: opts.max ?? 700,
+    size: opts.size ?? 2.4, hue: opts.hue ?? 185,
+    back: !!opts.back,                    // вернуться в исходную точку
+    grav: opts.grav ?? 0,
+  });
+}
+
+function stepParticles(dt) {
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i];
+    p.life += dt;
+    if (p.life >= p.max) { parts.splice(i, 1); continue; }
+    const t = p.life / p.max;
+    if (p.back) {
+      // разлетелся и вернулся: синус даёт ровный вылет и сбор
+      const k = Math.sin(Math.PI * t);
+      p.x = p.ox + p.vx * k;
+      p.y = p.oy + p.vy * k;
+    } else {
+      p.x += p.vx * dt / 1000;
+      p.y += p.vy * dt / 1000;
+      p.vy += p.grav * dt / 1000;
+    }
+  }
+}
+
+function drawParticles(target) {
+  target.globalCompositeOperation = 'lighter';
+  for (const p of parts) {
+    const t = p.life / p.max;
+    const a = p.back ? Math.sin(Math.PI * t) : 1 - t;
+    target.fillStyle = `hsla(${p.hue}, 100%, ${60 + 25 * a}%, ${a})`;
+    const sz = p.size * (0.6 + a * 0.8);
+    target.fillRect(p.x - sz / 2, p.y - sz / 2, sz, sz);
+  }
+  target.globalCompositeOperation = 'source-over';
+}
+
+// --- рассыпание в пыль -----------------------------------------------------
+const dust = { at: 0, dur: 1100 };
+
+function burstDust() {
+  if (!maskReady) return;
+  const mw = maskCanvas.width, mh = maskCanvas.height;
+  const data = mctx.getImageData(0, 0, mw, mh).data;
+  const step = 3;
+  let cx = 0, cy = 0, n = 0;
+  for (let y = 0; y < mh; y += step) {
+    for (let x = 0; x < mw; x += step) {
+      if (data[(y * mw + x) * 4 + 3] > 0) { cx += x; cy += y; n++; }
+    }
+  }
+  if (!n) return;
+  cx /= n; cy /= n;
+  for (let y = 0; y < mh; y += step) {
+    for (let x = 0; x < mw; x += step) {
+      if (data[(y * mw + x) * 4 + 3] === 0) continue;
+      if (Math.random() > 0.55) continue;             // прореживаем, чтобы не задохнуться
+      const px = vx(x / mw), py = vy(y / mh);
+      const dx = x - cx, dy = y - cy;
+      const len = Math.hypot(dx, dy) || 1;
+      const amp = 90 + Math.random() * 260;
+      spawn(px, py, (dx / len) * amp + (Math.random() - 0.5) * 60,
+            (dy / len) * amp + (Math.random() - 0.5) * 60,
+            { max: dust.dur, size: 2 + Math.random() * 2, hue: 190 + Math.random() * 40, back: true });
+    }
+  }
+  dust.at = performance.now();
+}
+
+const dustEnvelope = now => {
+  if (!dust.at) return 0;
+  const t = (now - dust.at) / dust.dur;
+  return t >= 1 ? 0 : Math.sin(Math.PI * t);
+};
+
+// --- матрица по силуэту ----------------------------------------------------
+const GLYPHS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノ0123456789<>/\\|[]{}=+*';
+const matrix = { cols: [], cell: 22, w: 0 };
+
+function drawMatrix(target) {
+  const W = view.W, H = view.H;
+  if (fxCanvas.width !== W) { fxCanvas.width = W; fxCanvas.height = H; }
+  if (matrix.w !== W) {
+    matrix.w = W;
+    matrix.cell = Math.max(Math.round(W / 46), 14);
+    matrix.cols = Array.from({ length: Math.ceil(W / matrix.cell) }, () => ({
+      y: Math.random() * H,
+      speed: 180 + Math.random() * 420,
+    }));
+  }
+  fctx.setTransform(1, 0, 0, 1, 0, 0);
+  fctx.clearRect(0, 0, W, H);
+  fctx.font = `${matrix.cell}px monospace`;
+  fctx.textBaseline = 'top';
+  const dt = 1 / 30;
+  for (let i = 0; i < matrix.cols.length; i++) {
+    const c = matrix.cols[i];
+    c.y += c.speed * dt;
+    if (c.y > H + matrix.cell * 8) c.y = -matrix.cell * (2 + Math.random() * 8);
+    const x = i * matrix.cell;
+    for (let k = 0; k < 9; k++) {
+      const y = c.y - k * matrix.cell;
+      if (y < -matrix.cell || y > H) continue;
+      const ch = GLYPHS[(Math.random() * GLYPHS.length) | 0];
+      fctx.fillStyle = k === 0 ? 'rgba(210,255,220,.95)'
+                               : `rgba(40,255,120,${0.75 - k * 0.08})`;
+      fctx.fillText(ch, x, y);
+    }
+  }
+  // код живёт только внутри силуэта
+  fctx.globalCompositeOperation = 'destination-in';
+  drawAligned(fctx, maskCanvas, maskCanvas.width, maskCanvas.height);
+  fctx.globalCompositeOperation = 'source-over';
+  target.drawImage(fxCanvas, 0, 0);
+}
+
+// --- эхо-двойники ----------------------------------------------------------
+const echo = { frames: [], every: 3, tick: 0, keep: 6 };
+
+function pushEcho(source) {
+  if (++echo.tick % echo.every) return;
+  const w = Math.round(view.W / 3), h = Math.round(view.H / 3);
+  let c = echo.frames.length >= echo.keep ? echo.frames.shift() : document.createElement('canvas');
+  if (c.width !== w) { c.width = w; c.height = h; }
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, w, h);
+  g.drawImage(source, 0, 0, w, h);
+  echo.frames.push(c);
+}
+
+function drawEcho(target) {
+  target.globalCompositeOperation = 'lighter';
+  echo.frames.forEach((c, i) => {
+    const a = 0.06 + i * 0.05;
+    target.globalAlpha = a;
+    target.filter = `hue-rotate(${(echo.frames.length - i) * 22}deg) saturate(1.6)`;
+    const off = (echo.frames.length - i) * 6;
+    target.drawImage(c, -off, 0, view.W, view.H);
+  });
+  target.globalAlpha = 1;
+  target.filter = 'none';
+  target.globalCompositeOperation = 'source-over';
+}
+
+// --- искры с рук и молния --------------------------------------------------
+const fxHands = { list: [], snap: { armed: false, at: 0, gap: 0, wrist: null }, clapAt: 0 };
+const TIPS_FX = [4, 8, 12, 16, 20];
+
+function snapSignalFx(lms, now) {
+  const size = d2(lms[0], lms[9]) || 1e-6;
+  const gap = d2(lms[4], lms[12]) / size;
+  const st = fxHands.snap;
+  if (gap < 0.45 && d2(lms[8], lms[0]) > d2(lms[6], lms[0]) * 1.05) {
+    if (!st.armed) st.gap = gap; else st.gap = Math.min(st.gap, gap);
+    st.armed = true; st.at = now; st.wrist = { x: lms[0].x, y: lms[0].y };
+    return false;
+  }
+  if (!st.armed) return false;
+  if (now - st.at > 220) { st.armed = false; return false; }
+  const grow = gap - st.gap;
+  if (grow < 0.3 || grow / ((now - st.at) / 1000 || 1) < 3) return false;
+  st.armed = false;
+  if (st.wrist && d2(lms[0], st.wrist) > 0.05) return false;   // это свайп, а не щелчок
+  return true;
+}
+
+function handEffects(target, hands, now) {
+  if (!hands.length) return;
+
+  for (const lms of hands) {
+    for (const i of TIPS_FX) {
+      const x = vx(lms[i].x), y = vy(lms[i].y);
+      if (fxOn.has('sparks')) {
+        for (let k = 0; k < 2; k++) {
+          spawn(x, y, (Math.random() - 0.5) * 120, (Math.random() - 0.5) * 120 - 40,
+                { max: 520, size: 1.8 + Math.random() * 2.2, hue: 180 + Math.random() * 60, grav: 260 });
+        }
+      }
+    }
+    if (fxOn.has('sparks') && snapSignalFx(lms, now)) {
+      const x = vx(lms[4].x), y = vy(lms[4].y);
+      for (let k = 0; k < 420; k++) {
+        const a = Math.random() * Math.PI * 2, sp = 200 + Math.random() * 900;
+        spawn(x, y, Math.cos(a) * sp, Math.sin(a) * sp,
+              { max: 700, size: 2 + Math.random() * 3, hue: 40 + Math.random() * 40, grav: 320 });
+      }
+      target.fillStyle = 'rgba(255,240,200,.35)';
+      target.fillRect(0, 0, view.W, view.H);
+    }
+  }
+
+  if (fxOn.has('lightning') && hands.length >= 2) {
+    const a = { x: vx(hands[0][9].x), y: vy(hands[0][9].y) };
+    const b = { x: vx(hands[1][9].x), y: vy(hands[1][9].y) };
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    drawBolt(target, a, b, 1);
+    // ладони сошлись — хлопок, вспышка на весь кадр
+    if (dist < view.W * 0.12 && now - fxHands.clapAt > 600) {
+      fxHands.clapAt = now;
+      for (let k = 0; k < 500; k++) {
+        const ang = Math.random() * Math.PI * 2, sp = 300 + Math.random() * 1100;
+        spawn((a.x + b.x) / 2, (a.y + b.y) / 2, Math.cos(ang) * sp, Math.sin(ang) * sp,
+              { max: 620, size: 2 + Math.random() * 3, hue: 190 + Math.random() * 50, grav: 200 });
+      }
+    }
+    if (now - fxHands.clapAt < 120) {
+      target.fillStyle = `rgba(220,245,255,${0.5 * (1 - (now - fxHands.clapAt) / 120)})`;
+      target.fillRect(0, 0, view.W, view.H);
+    }
+  }
+}
+
+// ломаная с ветвлением: дёшево, а читается как разряд
+function drawBolt(target, a, b, depth) {
+  const segs = 14;
+  target.save();
+  target.globalCompositeOperation = 'lighter';
+  target.strokeStyle = depth === 1 ? 'rgba(190,235,255,.95)' : 'rgba(140,210,255,.6)';
+  target.lineWidth = depth === 1 ? 3.5 : 1.6;
+  target.shadowColor = '#7fd8ff';
+  target.shadowBlur = depth === 1 ? 26 : 10;
+  target.beginPath();
+  target.moveTo(a.x, a.y);
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  const nx = -(b.y - a.y) / (len || 1), ny = (b.x - a.x) / (len || 1);
+  for (let i = 1; i <= segs; i++) {
+    const t = i / segs;
+    const j = (Math.random() - 0.5) * len * 0.18 * Math.sin(Math.PI * t);
+    const px = a.x + (b.x - a.x) * t + nx * j;
+    const py = a.y + (b.y - a.y) * t + ny * j;
+    target.lineTo(px, py);
+    if (depth === 1 && Math.random() < 0.18) {
+      const end = { x: px + (Math.random() - 0.5) * len * 0.4,
+                    y: py + (Math.random() - 0.5) * len * 0.4 };
+      drawBolt(target, { x: px, y: py }, end, 2);
+    }
+  }
+  target.stroke();
+  target.restore();
+}
+
+// --- маска по лицу ---------------------------------------------------------
+const EYE_L = [33, 133, 159, 145], EYE_R = [362, 263, 386, 374];
+const MOUTH = [13, 14, 78, 308];
+const blend = {};
+
+function faceEffects(target, res, now) {
+  const lm = res?.faceLandmarks?.[0];
+  if (!lm) return;
+  for (const c of res.faceBlendshapes?.[0]?.categories ?? []) blend[c.categoryName] = c.score;
+
+  const tess = FaceLandmarker.FACE_LANDMARKS_TESSELATION;
+  if (tess) {
+    target.save();
+    target.globalCompositeOperation = 'lighter';
+    target.strokeStyle = 'rgba(120,230,255,.22)';
+    target.lineWidth = 1;
+    target.beginPath();
+    for (const c of tess) {
+      const a = lm[c.start], b = lm[c.end];
+      if (!a || !b) continue;
+      target.moveTo(vx(a.x), vy(a.y));
+      target.lineTo(vx(b.x), vy(b.y));
+    }
+    target.stroke();
+    target.restore();
+  }
+
+  const mid = idx => {
+    let x = 0, y = 0;
+    for (const i of idx) { x += lm[i].x; y += lm[i].y; }
+    return { x: vx(x / idx.length), y: vy(y / idx.length) };
+  };
+
+  // брови вверх — глаза загораются
+  const brow = Math.max(blend.browInnerUp ?? 0, blend.browOuterUpLeft ?? 0);
+  if (brow > 0.3) {
+    for (const eye of [mid(EYE_L), mid(EYE_R)]) {
+      const r = view.W * 0.05 * (0.6 + brow);
+      const g = target.createRadialGradient(eye.x, eye.y, 1, eye.x, eye.y, r);
+      g.addColorStop(0, `rgba(255,240,180,${0.85 * brow})`);
+      g.addColorStop(1, 'rgba(255,180,40,0)');
+      target.globalCompositeOperation = 'lighter';
+      target.fillStyle = g;
+      target.beginPath();
+      target.arc(eye.x, eye.y, r, 0, Math.PI * 2);
+      target.fill();
+      target.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  // открыл рот — оттуда идёт огонь
+  const jaw = blend.jawOpen ?? 0;
+  if (jaw > 0.3) {
+    const m = mid(MOUTH);
+    const count = Math.round(jaw * 18);
+    for (let k = 0; k < count; k++) {
+      spawn(m.x + (Math.random() - 0.5) * view.W * 0.05, m.y,
+            (Math.random() - 0.5) * 120, -160 - Math.random() * 420,
+            { max: 620, size: 2.5 + Math.random() * 3.5, hue: 20 + Math.random() * 35, grav: 120 });
+    }
+  }
 }
 
 // --- запись ----------------------------------------------------------------
@@ -1776,6 +2233,12 @@ function finishEditRec() {
 }
 
 // --- цикл режима -----------------------------------------------------------
+function fxNeeds(kind) {
+  if (kind === 'face') return true;                 // рамка лица нужна всегда
+  for (const key of fxOn) if (FX[key].needs.includes(kind)) return true;
+  return false;
+}
+
 function runEdit(drawing) {
   if (!faceLandmarker) { loadFace(); return; }
   const now = performance.now();
@@ -1783,6 +2246,18 @@ function runEdit(drawing) {
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
     const res = faceLandmarker.detectForVideo(video, now);
+    lastFace = res;
+
+    if (fxNeeds('hands') && landmarker) {
+      lastFxHands = landmarker.detectForVideo(video, now + 0.3)?.landmarks ?? [];
+    } else {
+      lastFxHands = [];
+    }
+    if (fxNeeds('seg')) {
+      if (!segmenter) loadSeg();
+      else updateMask(segmenter.segmentForVideo(video, now + 0.6));
+    }
+
     const box = faceBox(res);
     if (box) {
       // рамку сглаживаем, иначе кадр дёргается на каждом кадре модели
@@ -1793,7 +2268,10 @@ function runEdit(drawing) {
     }
   }
 
-  if (detectBeat(now)) edit.pulse = 1;
+  if (detectBeat(now)) {
+    edit.pulse = 1;
+    if (fxOn.has('dust') && maskReady && now - dust.at > dust.dur) burstDust();
+  }
   edit.pulse *= 0.86;                             // затухание удара
   if (edit.pulse < 0.01) edit.pulse = 0;
 
@@ -1818,7 +2296,7 @@ function runEdit(drawing) {
     curl.note = edit.recorder ? 'идёт запись' : (musicEl?.src ? 'трек заряжен' : 'можно без музыки');
   }
   phaseEl.textContent = curl.note;
-  handsEl.textContent = edit.face ? 'лицо в кадре' : 'лица нет';
+  handsEl.textContent = `${edit.face ? 'лицо' : 'нет лица'} · частиц ${parts.length}`;
   gestEl.textContent = `${PRESETS[edit.preset].name} · ${edit.beats}`;
   lastHandAt = now;
 }
@@ -2011,6 +2489,31 @@ editPresetSel.addEventListener('change', () => {
   edit.preset = editPresetSel.value;
   say(`пресет: ${PRESETS[edit.preset].name}`);
 });
+// список эффектов строим из реестра: добавить новый — одна строка в FX
+const fxListEl = document.getElementById('fxList');
+for (const [key, f] of Object.entries(FX)) {
+  const row = document.createElement('label');
+  row.className = 'row';
+  const span = document.createElement('span');
+  span.textContent = f.name;
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.addEventListener('change', () => {
+    if (box.checked) {
+      fxOn.add(key);
+      if (f.needs.includes('seg')) loadSeg().catch(e => say(`силуэт не загрузился: ${e.message}`));
+      say(`${f.name}: включён`);
+    } else {
+      fxOn.delete(key);
+      if (key === 'echo') echo.frames.length = 0;
+      say(`${f.name}: выключен`);
+    }
+  });
+  row.append(span, box);
+  fxListEl.appendChild(row);
+  f.box = box;
+}
+
 editRecBtn.addEventListener('click', () => (edit.recorder ? stopEditRec() : startEditRec()));
 editMusicEl.addEventListener('change', () => {
   const f = editMusicEl.files?.[0];

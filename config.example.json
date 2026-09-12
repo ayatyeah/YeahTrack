@@ -35,7 +35,8 @@
     "preset": "gym",
     "seconds": 15,
     "vertical": true,
-    "faceTrack": true
+    "faceTrack": true,
+    "fx": []
   },
 
   "guard": {

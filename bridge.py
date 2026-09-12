@@ -108,6 +108,9 @@ DEFAULT_CONFIG = {
         'seconds': 15,
         'vertical': True,
         'faceTrack': True,
+        # какие слои включены при старте: echo, matrix, dust, sparks,
+        # lightning, faceMask
+        'fx': [],
     },
     'guard': {
         'armSec': 15,           # столько на то, чтобы уйти из кадра
