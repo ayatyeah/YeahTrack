@@ -50,7 +50,8 @@
 
   "xray": {
     "panelH": 0.42,
-    "density": 1300
+    "density": 1300,
+    "style": "shadow"
   },
 
   "guard": {

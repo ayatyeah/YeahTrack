@@ -34,7 +34,7 @@ const cfg = {
   guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
   wow: { gravity: 1400, bounce: 0.45 },
   tony: { model: 'reactor' },
-  xray: { panelH: 0.42, density: 1300 },
+  xray: { panelH: 0.42, density: 1300, style: 'shadow' },
   edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true, fx: [] },
   laid: {
     media: true,
@@ -89,6 +89,10 @@ async function loadConfig() {
   if (typeof cfg.edit?.seconds === 'number') opt.editSec.value = String(cfg.edit.seconds);
   if (cfg.edit && cfg.edit.vertical === false) opt.vertical.checked = false;
   if (cfg.edit && cfg.edit.faceTrack === false) opt.faceTrack.checked = false;
+  if (cfg.xray?.style) {
+    xray.style = cfg.xray.style;
+    xrayStyleSel.value = xray.style;
+  }
   if (typeof cfg.xray?.panelH === 'number') opt.panelH.value = String(cfg.xray.panelH);
   if (typeof cfg.xray?.density === 'number') opt.density.value = String(cfg.xray.density);
   if (cfg.tony?.model && HOLOS[cfg.tony.model]) {
@@ -3143,12 +3147,89 @@ const edgeCanvas = document.createElement('canvas');
 const ectx = edgeCanvas.getContext('2d');
 
 const xray = {
+  style: 'shadow',    // shadow — тёмный силуэт с белыми глазами, cloud — просвет
   pts: [],            // облако в нормализованных координатах
   builtAt: 0,
-  hint: 'подними две открытые ладони',
+  hint: 'сведи два уголка',
   lastAt: 0,
   scan: 0,
+  armed: false,       // рамку «создали», сведя уголки
+  lostAt: 0,
+  flashAt: 0,
 };
+
+// Заливает силуэт одним цветом: маска рисуется в отдельный холст,
+// затем перекрашивается целиком.
+function fillMask(target, color) {
+  if (!maskReady) return;
+  const W = view.W, H = view.H;
+  if (edgeCanvas.width !== W) { edgeCanvas.width = W; edgeCanvas.height = H; }
+  ectx.setTransform(1, 0, 0, 1, 0, 0);
+  ectx.clearRect(0, 0, W, H);
+  drawAligned(ectx, maskCanvas, maskCanvas.width, maskCanvas.height);
+  ectx.globalCompositeOperation = 'source-in';
+  ectx.fillStyle = color;
+  ectx.fillRect(0, 0, W, H);
+  ectx.globalCompositeOperation = 'source-over';
+  target.drawImage(edgeCanvas, 0, 0);
+}
+
+// Тёмная фигура, у которой видно только глаза. Глаза берём из скелета:
+// точки 2 и 5 — это левый и правый глаз, отдельная модель лица не нужна.
+function drawShadowInside(pose, now, W, H) {
+  // комнату притемняем, иначе чёрную фигуру на чёрном не разглядеть
+  ctx.fillStyle = 'rgba(6,14,30,.62)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!maskReady) {
+    ctx.fillStyle = 'rgba(160,220,255,.5)';
+    ctx.font = `${Math.round(W / 46)}px monospace`;
+    ctx.fillText('ищу силуэт…', W * 0.06, H * 0.5);
+    return;
+  }
+
+  if (opt.outline.checked) {
+    // тонкая подсветка по краю: без неё фигура сливается с фоном
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = 0.5;
+    drawSilhouetteEdge(ctx);
+    ctx.restore();
+  }
+  fillMask(ctx, '#01030a');
+
+  if (!pose) return;
+  const eyes = [pose[2], pose[5]].filter(visible);
+  if (!eyes.length) return;
+
+  // размер глаза — от расстояния между ушами, чтобы не зависеть от дистанции
+  let head = W * 0.1;
+  if (visible(pose[7]) && visible(pose[8])) {
+    head = Math.abs(vx(pose[7].x) - vx(pose[8].x)) || head;
+  }
+  const r = Math.max(head * 0.075, 2.5);
+  const glow = 1 + 0.12 * Math.sin(now / 420);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  for (const e of eyes) {
+    const x = vx(e.x), y = vy(e.y);
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r * 7 * glow);
+    g.addColorStop(0, 'rgba(255,255,255,.95)');
+    g.addColorStop(0.25, 'rgba(215,240,255,.45)');
+    g.addColorStop(1, 'rgba(150,210,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, r * 7 * glow, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.ellipse(x, y, r * 1.35, r, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
 
 // Облако точек пересобираем не каждый кадр: маска меняется медленнее,
 // а пересборка стоит чтения всей маски.
@@ -3345,21 +3426,57 @@ function runXray(drawing) {
   const pose = lastPose?.landmarks?.[0] ?? null;
   const px = lm => [(opt.mirror.checked ? 1 - lm.x : lm.x) * W, lm.y * H];
 
-  // рамку держат две открытые ладони
-  const palms = [];
+  // Рамку держат либо два уголка из большого и указательного, либо две
+  // открытые ладони. Уголки главные: их надо сначала свести, тогда рамка
+  // «создаётся», а дальше она растёт, когда уголки разводишь.
+  const palms = [], corners = [];
   for (const lms of hands) {
     const g = gestureOf(lms);
-    if (g.pose === 'palm' || g.ext.filter(Boolean).length >= 3) palms.push(px(lms[9]));
+    if (isL(g)) corners.push(px(lms[5]));
+    else if (g.pose === 'palm' || g.ext.filter(Boolean).length >= 3) palms.push(px(lms[9]));
   }
 
   if (now - xray.builtAt > 250) buildXrayCloud(pose);
 
-  if (palms.length >= 2 && drawing) {
+  let panel = null;
+  if (corners.length >= 2) {
+    const [a, b] = corners;
+    const gap = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    xray.lostAt = 0;
+    if (!xray.armed && gap < W * 0.14) {
+      xray.armed = true;
+      xray.flashAt = now;
+      xray.hint = 'рамка создана, разводи уголки';
+    }
+    if (xray.armed) {
+      const w = Math.abs(b[0] - a[0]), h = Math.abs(b[1] - a[1]);
+      if (Math.min(w, h) > W * 0.05) {
+        panel = { cx: (a[0] + b[0]) / 2, cy: (a[1] + b[1]) / 2, w, h, ang: 0 };
+        xray.hint = 'просвечиваю';
+      } else {
+        xray.hint = 'разводи уголки шире';
+      }
+    } else {
+      xray.hint = 'сведи уголки вместе';
+    }
+  } else if (palms.length >= 2) {
     const [a, b] = palms.sort((p, q) => p[0] - q[0]);
     const w = Math.hypot(b[0] - a[0], b[1] - a[1]) * 0.98;
-    const h = w * parseFloat(opt.panelH.value);
-    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
-    const cxp = (a[0] + b[0]) / 2, cyp = (a[1] + b[1]) / 2;
+    panel = { cx: (a[0] + b[0]) / 2, cy: (a[1] + b[1]) / 2,
+              w, h: w * parseFloat(opt.panelH.value),
+              ang: Math.atan2(b[1] - a[1], b[0] - a[0]) };
+    xray.hint = 'просвечиваю';
+  } else {
+    // уголки могли мигнуть на кадр: не сбрасываем рамку сразу
+    if (!xray.lostAt) xray.lostAt = now;
+    if (now - xray.lostAt > 500) xray.armed = false;
+    xray.hint = corners.length === 1 || palms.length === 1
+      ? 'нужна вторая рука'
+      : 'сведи два уголка';
+  }
+
+  if (panel && drawing) {
+    const { cx: cxp, cy: cyp, w, h, ang } = panel;
 
     // Клип задаём в повёрнутых координатах, а содержимое рисуем в обычных:
     // область отсечения остаётся на месте после сброса преобразования.
@@ -3370,7 +3487,8 @@ function runXray(drawing) {
     ctx.rect(-w / 2, -h / 2, w, h);
     ctx.clip();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    drawXrayInside(pose, now, W, H);
+    if (xray.style === 'shadow') drawShadowInside(pose, now, W, H);
+    else drawXrayInside(pose, now, W, H);
 
     // сканирующая полоса внутри рамки
     xray.scan = (xray.scan + 0.006) % 1;
@@ -3384,15 +3502,22 @@ function runXray(drawing) {
     ctx.restore();
 
     drawPanelFrame(cxp, cyp, w, h, ang);
-    xray.hint = 'просвечиваю';
-  } else {
-    xray.hint = palms.length === 1 ? 'нужна вторая ладонь'
-                                   : 'подними две открытые ладони';
+
+    // вспышка в момент создания рамки
+    if (now - xray.flashAt < 220) {
+      const k = 1 - (now - xray.flashAt) / 220;
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = `rgba(120,210,255,${k})`;
+      ctx.lineWidth = 3 + 26 * k;
+      ctx.strokeRect(cxp - w / 2, cyp - h / 2, w, h);
+      ctx.restore();
+    }
   }
 
   xrayPtsEl.textContent = String(xray.pts.length);
-  repsEl.textContent = String(palms.length);
-  repsLeftEl.textContent = pose ? 'скелет' : 'нет скелета';
+  repsEl.textContent = String(corners.length + palms.length);
+  repsLeftEl.textContent = xray.armed ? 'рамка есть' : (pose ? 'скелет' : 'нет скелета');
   repsRightEl.textContent = maskReady ? 'силуэт' : 'нет силуэта';
   phaseEl.textContent = xray.hint;
   handsEl.textContent = `ладоней ${palms.length}`;
@@ -3651,6 +3776,12 @@ document.getElementById('tonyReset').addEventListener('click', resetTony);
 tonyRecBtn.addEventListener('click', () => (edit.recorder
   ? stopEditRec()
   : startEditRec(canvas, tonyRecBtn, tonySaveEl)));
+const xrayStyleSel = document.getElementById('xrayStyle');
+xrayStyleSel.addEventListener('change', () => {
+  xray.style = xrayStyleSel.value;
+  say(xray.style === 'shadow' ? 'тень с белыми глазами' : 'просвет точками');
+});
+
 xrayRecBtn.addEventListener('click', () => (edit.recorder
   ? stopEditRec()
   : startEditRec(canvas, xrayRecBtn, xraySaveEl)));
