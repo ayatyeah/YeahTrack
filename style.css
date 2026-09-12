@@ -111,7 +111,11 @@ button.secondary:hover{border-color:rgba(92,225,230,.5);color:var(--accent)}
 .mode.on{background:var(--accent);color:#04121a;border-color:transparent}
 
 body:not(.mode-laid) .laid-only{display:none}
-body.mode-laid .gestures-only{display:none}
+body:not(.mode-posture) .posture-only{display:none}
+body:not(.mode-guard) .guard-only{display:none}
+body.mode-laid .gestures-only,
+body.mode-posture .gestures-only,
+body.mode-guard .gestures-only{display:none}
 
 .counter{
   position:absolute;left:50%;top:24px;transform:translateX(-50%);z-index:4;
@@ -169,3 +173,6 @@ body.mode-laid .gestures-only{display:none}
 }
 .counter.calib .reps{font-size:44px;color:var(--txt)}
 .row b{color:var(--txt);font-variant-numeric:tabular-nums}
+
+.counter.bad .reps{color:#ff9d9d}
+.counter.warn .reps{color:#ffd166}

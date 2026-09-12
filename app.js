@@ -29,6 +29,8 @@ const cfg = {
   },
   mouse: { enabled: false, gain: 1700, scrollGain: 1.0, smooth: 0.45 },
   idle: { afterSec: 5, fps: 4 },
+  posture: { fps: 3, slouch: 0.12, tiltDeg: 8, holdSec: 8, cooldownSec: 600, voice: false },
+  guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
   laid: {
     media: true,
     mediaAfter: 0,            // 0 — по первому сгибанию, иначе столько зачтённых повторений
@@ -69,7 +71,13 @@ async function loadConfig() {
     exerciseSel.value = exercise;
   }
   if (typeof cfg.laid.restSec === 'number') opt.rest.value = String(cfg.laid.restSec);
-  if (cfg.mode === 'laid') setMode('laid');
+  if (typeof cfg.posture?.slouch === 'number') opt.slouch.value = String(cfg.posture.slouch);
+  if (typeof cfg.posture?.holdSec === 'number') opt.hold.value = String(cfg.posture.holdSec);
+  if (cfg.posture?.voice) opt.postureVoice.checked = true;
+  if (typeof cfg.guard?.sensitivity === 'number') opt.sens.value = String(cfg.guard.sensitivity);
+  if (cfg.guard && cfg.guard.person === false) opt.person.checked = false;
+  if (cfg.guard && cfg.guard.shots === false) opt.shots.checked = false;
+  if (cfg.mode && cfg.mode !== 'gestures') setMode(cfg.mode);
 }
 
 const opt = {
@@ -92,6 +100,12 @@ const opt = {
   windows:  document.getElementById('optWindows'),
   voice:    document.getElementById('optVoice'),
   rest:     document.getElementById('optRest'),
+  slouch:   document.getElementById('optSlouch'),
+  hold:     document.getElementById('optHold'),
+  postureVoice: document.getElementById('optPostureVoice'),
+  person:   document.getElementById('optPerson'),
+  sens:     document.getElementById('optSens'),
+  shots:    document.getElementById('optShots'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -103,6 +117,8 @@ const phaseEl    = document.getElementById('phase');
 const restEl     = document.getElementById('rest');
 const todayEl    = document.getElementById('todayTotal');
 const exerciseSel= document.getElementById('exerciseSel');
+const postureWarnsEl = document.getElementById('postureWarns');
+const guardCountEl   = document.getElementById('guardCount');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -1207,11 +1223,286 @@ function stopMedia() {
   mediaAudio.src = 'about:blank';
 }
 
+// --- режим осанки ----------------------------------------------------------
+// Следим за двумя вещами: не просела ли шея (сутулость) и не перекошены ли
+// плечи. Норму берём не из книжки, а из твоей же ровной посадки.
+const NOSE = 0;
+
+const posture = {
+  base: 0,          // отношение «шея / ширина плеч» в ровной посадке
+  neck: 0,
+  tilt: 0,
+  badSince: 0,
+  lastWarn: 0,
+  warns: 0,
+  calibUntil: 0,
+  samples: [],
+};
+
+try {
+  const saved = parseFloat(localStorage.getItem('yeahtrack.posture') || '');
+  if (saved > 0) posture.base = saved;
+} catch { /* приватный режим */ }
+
+function postureMetrics(pose) {
+  const ls = pose[POSE.LS], rs = pose[POSE.RS], nose = pose[NOSE];
+  if (!visible(ls) || !visible(rs) || !visible(nose)) return null;
+  const width = d2(ls, rs);
+  if (width < 0.08) return null;                  // отвернулся или ушёл далеко
+  const mid = { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
+  return {
+    neck: d2(nose, mid) / width,                  // чем ниже голова, тем меньше
+    tilt: Math.abs(Math.atan2(rs.y - ls.y, rs.x - ls.x) * 180 / Math.PI),
+    width,
+  };
+}
+
+function startPostureCalib() {
+  posture.calibUntil = performance.now() + 3000;
+  posture.samples = [];
+  say('сядь ровно и держи');
+  speak('сядь ровно');
+}
+
+function runPosture(drawing) {
+  if (!poseLandmarker) { loadPose(); return; }
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    lastPose = poseLandmarker.detectForVideo(video, performance.now());
+  }
+  const pose = lastPose?.landmarks?.[0] ?? null;
+  const m = pose ? postureMetrics(pose) : null;
+  const now = performance.now();
+
+  if (!m) {
+    posture.badSince = 0;
+    curl.note = 'не вижу плечи и голову';
+    repsEl.textContent = '—';
+    counterEl.classList.remove('bad', 'warn');
+    handsEl.textContent = 'осанка: нет кадра';
+    if (drawing && pose) drawPosture(pose, null);
+    return;
+  }
+
+  posture.neck = m.neck;
+  posture.tilt = m.tilt;
+
+  if (posture.calibUntil) {
+    posture.samples.push(m.neck);
+    const left = Math.ceil((posture.calibUntil - now) / 1000);
+    repsEl.textContent = String(Math.max(left, 0));
+    curl.note = 'сядь ровно и держи';
+    if (now >= posture.calibUntil) {
+      posture.calibUntil = 0;
+      const sorted = posture.samples.slice().sort((a, b) => a - b);
+      posture.base = sorted[Math.floor(sorted.length / 2)] || 0;   // медиана устойчивее среднего
+      try { localStorage.setItem('yeahtrack.posture', String(posture.base)); } catch { /* ок */ }
+      say(`норма запомнена: ${posture.base.toFixed(2)}`);
+      speak('запомнил');
+    }
+    if (drawing) drawPosture(pose, m);
+    return;
+  }
+
+  if (!posture.base) {
+    curl.note = 'нажми «Запомнить ровную посадку»';
+    repsEl.textContent = '—';
+    if (drawing) drawPosture(pose, m);
+    return;
+  }
+
+  const slouch = parseFloat(opt.slouch.value);
+  const holdMs = parseFloat(opt.hold.value) * 1000;
+  const badNeck = m.neck < posture.base * (1 - slouch);
+  const badTilt = m.tilt > (cfg.posture.tiltDeg || 8);
+  const bad = badNeck || badTilt;
+
+  if (bad) {
+    if (!posture.badSince) posture.badSince = now;
+  } else {
+    posture.badSince = 0;
+  }
+
+  const held = posture.badSince ? now - posture.badSince : 0;
+  const cool = (cfg.posture.cooldownSec || 600) * 1000;
+  if (held > holdMs && now - posture.lastWarn > cool) {
+    posture.lastWarn = now;
+    posture.warns++;
+    const what = badNeck ? 'сутулишься' : 'плечи перекошены';
+    osdSay(`Осанка: ${what}`);
+    if (opt.postureVoice.checked) speak(what);
+    say(`замечание: ${what}`);
+  }
+
+  // процент от нормы: 100 — как при калибровке, ниже — голова опустилась
+  const score = Math.round(Math.min(m.neck / posture.base, 1.5) * 100);
+  repsEl.textContent = `${score}`;
+  counterEl.classList.toggle('bad', bad && held > holdMs);
+  counterEl.classList.toggle('warn', bad && held <= holdMs);
+  if (performance.now() > curl.noteUntil) {
+    curl.note = bad
+      ? `${badNeck ? 'сутулишься' : 'перекос плеч'} ${Math.round(held / 1000)} с`
+      : 'посадка ровная';
+  }
+  repsLeftEl.textContent = String(posture.warns);
+  repsRightEl.textContent = `${Math.round(m.tilt)}°`;
+  phaseEl.textContent = curl.note;
+  postureWarnsEl.textContent = String(posture.warns);
+  handsEl.textContent = `шея ${m.neck.toFixed(2)} · перекос ${Math.round(m.tilt)}°`;
+  gestEl.textContent = `осанка ${score}%`;
+  if (drawing) drawPosture(pose, m);
+}
+
+function drawPosture(pose, m) {
+  const dpr = canvas.width / parseFloat(canvas.style.width);
+  const lw = parseFloat(opt.width.value) * dpr;
+  const px = lm => [(opt.mirror.checked ? 1 - lm.x : lm.x) * canvas.width,
+                    lm.y * canvas.height];
+  const ls = pose[POSE.LS], rs = pose[POSE.RS], nose = pose[NOSE];
+  if (!visible(ls) || !visible(rs)) return;
+
+  const bad = counterEl.classList.contains('bad') || counterEl.classList.contains('warn');
+  ctx.lineCap = 'round';
+  ctx.lineWidth = lw * 1.1;
+  ctx.strokeStyle = bad ? '#ff9d9d' : '#5ce1e6';
+  ctx.beginPath();
+  ctx.moveTo(...px(ls));
+  ctx.lineTo(...px(rs));
+  ctx.stroke();
+
+  if (m && visible(nose)) {
+    const mid = { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
+    ctx.beginPath();
+    ctx.moveTo(...px(mid));
+    ctx.lineTo(...px(nose));
+    ctx.strokeStyle = bad ? '#ff9d9d' : 'rgba(255,255,255,.85)';
+    ctx.stroke();
+  }
+  for (const lm of [ls, rs, nose]) {
+    if (!visible(lm)) continue;
+    ctx.beginPath();
+    ctx.arc(...px(lm), lw * 0.8, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+  }
+}
+
+// --- режим охраны ----------------------------------------------------------
+// Движение ловим сравнением кадров на маленьком холсте: это дёшево и работает
+// без всяких моделей. Силуэт человека, если он нужен, подтверждает скелет.
+const GUARD_W = 64, GUARD_H = 48;
+const guardCanvas = document.createElement('canvas');
+guardCanvas.width = GUARD_W;
+guardCanvas.height = GUARD_H;
+const guardCtx = guardCanvas.getContext('2d', { willReadFrequently: true });
+const shotCanvas = document.createElement('canvas');
+
+const guard = { prev: null, armAt: 0, lastShot: 0, alarms: 0, busy: false, diff: 0 };
+
+function armGuard() {
+  guard.armAt = performance.now() + (cfg.guard.armSec || 15) * 1000;
+  guard.prev = null;
+  say('охрана включится, уходи из кадра');
+}
+
+function frameDiff() {
+  guardCtx.drawImage(video, 0, 0, GUARD_W, GUARD_H);
+  const cur = guardCtx.getImageData(0, 0, GUARD_W, GUARD_H).data;
+  if (!guard.prev) { guard.prev = cur.slice(); return 0; }
+  let sum = 0;
+  for (let i = 0; i < cur.length; i += 4) {
+    // яркость дешевле и устойчивее к шуму цветности
+    const a = (cur[i] + cur[i + 1] + cur[i + 2]) / 3;
+    const b = (guard.prev[i] + guard.prev[i + 1] + guard.prev[i + 2]) / 3;
+    sum += Math.abs(a - b);
+  }
+  guard.prev = cur.slice();
+  return sum / (cur.length / 4);
+}
+
+function grabShot() {
+  shotCanvas.width = video.videoWidth || 640;
+  shotCanvas.height = video.videoHeight || 480;
+  shotCanvas.getContext('2d').drawImage(video, 0, 0, shotCanvas.width, shotCanvas.height);
+  return shotCanvas.toDataURL('image/jpeg', 0.7);
+}
+
+function raiseAlarm(reason) {
+  if (guard.busy) return;
+  guard.busy = true;
+  guard.alarms++;
+  guard.lastShot = performance.now();
+  const body = { reason };
+  if (opt.shots.checked) {
+    try { body.image = grabShot(); } catch (e) { console.warn('кадр не снялся', e); }
+  }
+  fetch('/guard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch(() => {}).finally(() => { guard.busy = false; });
+  say(`тревога: ${reason}`);
+}
+
+function runGuard(drawing) {
+  const now = performance.now();
+  const arming = now < guard.armAt;
+  const wantPerson = opt.person.checked;
+
+  if (wantPerson && !poseLandmarker) { loadPose(); }
+
+  let person = false;
+  if (wantPerson && poseLandmarker && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    lastPose = poseLandmarker.detectForVideo(video, now);
+  }
+  if (wantPerson) {
+    const pose = lastPose?.landmarks?.[0] ?? null;
+    person = !!pose && visible(pose[POSE.LS]) && visible(pose[POSE.RS]);
+  }
+
+  guard.diff = video.readyState >= 2 ? frameDiff() : 0;
+  const moved = guard.diff > parseFloat(opt.sens.value);
+
+  if (arming) {
+    repsEl.textContent = String(Math.ceil((guard.armAt - now) / 1000));
+    curl.note = 'уходи из кадра';
+    counterEl.classList.remove('bad', 'warn');
+  } else {
+    const cool = (cfg.guard.cooldownSec || 30) * 1000;
+    const triggered = wantPerson ? (person && moved) : moved;
+    if (triggered && now - guard.lastShot > cool) {
+      raiseAlarm(person ? 'человек в кадре' : 'движение');
+    }
+    repsEl.textContent = String(guard.alarms);
+    counterEl.classList.toggle('bad', triggered);
+    counterEl.classList.remove('warn');
+    if (performance.now() > curl.noteUntil) {
+      curl.note = triggered ? 'вижу движение' : 'тихо';
+    }
+  }
+
+  repsLeftEl.textContent = String(Math.round(guard.diff));
+  repsRightEl.textContent = person ? 'человек' : '—';
+  phaseEl.textContent = curl.note;
+  guardCountEl.textContent = String(guard.alarms);
+  handsEl.textContent = `движение ${guard.diff.toFixed(1)}`;
+  gestEl.textContent = `тревог: ${guard.alarms}`;
+  lastHandAt = now;                       // дремать нельзя, иначе пропустим гостя
+
+  if (drawing && lastPose?.landmarks?.[0]) drawPosture(lastPose.landmarks[0], null);
+}
+
 // --- главный цикл ----------------------------------------------------------
 let mode = 'gestures';
 let lastHandAt = 0;
 function nextFrame() {
   // пустой кадр не стоит тридцати проверок в секунду: дремлем, пока рук нет
+  if (mode === 'posture') {
+    // осанка меняется медленно, тридцать кадров в секунду тут ни к чему
+    return void setTimeout(loop, Math.round(1000 / Math.max(cfg.posture.fps, 1)));
+  }
   const quiet = lastHandAt && (performance.now() - lastHandAt) / 1000 > cfg.idle.afterSec;
   if (quiet) return void setTimeout(loop, Math.round(1000 / Math.max(cfg.idle.fps, 1)));
   // в демоне и на скрытом окне rAF ненадёжен — держим таймером
@@ -1237,11 +1528,9 @@ function loop() {
     }
   }
 
-  if (mode === 'laid') {
-    runLaid(drawing);
-    tickFps();
-    return;
-  }
+  if (mode === 'laid') { runLaid(drawing); tickFps(); return; }
+  if (mode === 'posture') { runPosture(drawing); tickFps(); return; }
+  if (mode === 'guard') { runGuard(drawing); tickFps(); return; }
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -1314,26 +1603,46 @@ compactBtn.addEventListener('click', async () => {
 });
 
 const modeBtns = Array.from(document.querySelectorAll('.mode'));
+const MODE_NAMES = {
+  gestures: 'режим жестов',
+  laid: 'режим Дэвида Лэйда',
+  posture: 'режим осанки',
+  guard: 'режим охраны',
+};
+
 async function setMode(next) {
   if (mode === next) return;
   mode = next;
-  document.body.classList.toggle('mode-laid', mode === 'laid');
-  counterEl.hidden = mode !== 'laid';
+  for (const name of ['laid', 'posture', 'guard']) {
+    document.body.classList.toggle(`mode-${name}`, mode === name);
+  }
+  counterEl.hidden = mode === 'gestures';
+  counterEl.classList.remove('bad', 'warn');
   modeBtns.forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   lastVideoTime = -1;                       // модели считают кадры по времени
-  if (mode !== 'laid') {
+  toast(MODE_NAMES[mode] || mode);
+
+  if (mode === 'gestures') {
     stopMedia();
-    toast('режим жестов');
     return;
   }
-  mouseRelease();                           // в качалке мышь не нужна
+  mouseRelease();                           // вне жестов мышь не нужна
   resetSwipe();
+  if (mode !== 'laid') stopMedia();
+
+  if (mode === 'guard') {
+    armGuard();
+    paintCounter();
+    if (opt.person.checked) loadPose().catch(e => say(`скелет не загрузился: ${e.message}`));
+    return;
+  }
+
   curl.note = 'гружу скелет…';
   paintCounter();
-  refreshToday();
+  if (mode === 'laid') refreshToday();
   try {
     await loadPose();
-    curl.note = 'встань в кадр целиком';
+    curl.note = mode === 'laid' ? 'встань в кадр целиком' : 'сядь как обычно';
   } catch (e) {
     curl.note = `скелет не загрузился: ${e.message}`;
   }
@@ -1343,6 +1652,7 @@ async function setMode(next) {
 modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 document.getElementById('resetReps').addEventListener('click', () => resetReps());
 document.getElementById('calibBtn').addEventListener('click', startCalibration);
+document.getElementById('postureCalib').addEventListener('click', startPostureCalib);
 
 for (const [key, ex] of Object.entries(EXERCISES)) {
   const o = document.createElement('option');

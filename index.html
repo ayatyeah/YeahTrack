@@ -34,6 +34,8 @@
       <div class="modes">
         <button class="mode on" id="modeGestures" data-mode="gestures">Режим жестов</button>
         <button class="mode" id="modeLaid" data-mode="laid">Режим Дэвида Лэйда</button>
+        <button class="mode" id="modePosture" data-mode="posture">Режим осанки</button>
+        <button class="mode" id="modeGuard" data-mode="guard">Режим охраны</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -55,34 +57,34 @@
         <span>Шлейф пальцев</span>
         <input type="checkbox" id="optTrail" checked>
       </label>
-      <div class="sep">Жесты</div>
-      <label class="row">
+      <div class="sep gestures-only">Жесты</div>
+      <label class="row gestures-only">
         <span>Свайп 3 пальцами</span>
         <input type="checkbox" id="optSwipe" checked>
       </label>
-      <label class="row">
+      <label class="row gestures-only">
         <span>Инвертировать</span>
         <input type="checkbox" id="optInvert">
       </label>
-      <label class="row">
+      <label class="row gestures-only">
         <span>Порог</span>
         <input type="range" id="optThresh" min="0.06" max="0.34" step="0.01" value="0.15">
       </label>
-      <label class="row">
+      <label class="row gestures-only">
         <span>Мышь рукой</span>
         <input type="checkbox" id="optMouse">
       </label>
-      <label class="row">
+      <label class="row gestures-only">
         <span>Щелчок = закрыть окно</span>
         <input type="checkbox" id="optSnap" checked>
       </label>
-      <label class="row">
+      <label class="row gestures-only">
         <span>Кулак → ладонь = Super</span>
         <input type="checkbox" id="optSeq" checked>
       </label>
-      <button id="pinBtn" class="secondary">Окно на все столы</button>
-      <button id="compactBtn" class="secondary">Компактно поверх всех</button>
-      <p class="hint">Закреплённое окно не уезжает со столом. Компактное не
+      <button id="pinBtn" class="secondary gestures-only">Окно на все столы</button>
+      <button id="compactBtn" class="secondary gestures-only">Компактно поверх всех</button>
+      <p class="hint gestures-only">Закреплённое окно не уезжает со столом. Компактное не
       закрывает вид, иначе смены стола не видно.</p>
       <div class="sep laid-only">Упражнение</div>
       <div class="row laid-only">
@@ -120,6 +122,38 @@
       </label>
       <div class="row laid-only"><span>Сегодня</span><b id="todayTotal">—</b></div>
       <button id="resetReps" class="secondary laid-only">Обнулить счёт</button>
+
+      <div class="sep posture-only">Осанка</div>
+      <button id="postureCalib" class="secondary posture-only">Запомнить ровную посадку</button>
+      <label class="row posture-only">
+        <span>Порог сутулости</span>
+        <input type="range" id="optSlouch" min="0.05" max="0.3" step="0.01" value="0.12">
+      </label>
+      <label class="row posture-only">
+        <span>Терпеть, сек</span>
+        <input type="range" id="optHold" min="3" max="60" step="1" value="8">
+      </label>
+      <label class="row posture-only">
+        <span>Напоминать вслух</span>
+        <input type="checkbox" id="optPostureVoice">
+      </label>
+      <div class="row posture-only"><span>Замечаний</span><b id="postureWarns">0</b></div>
+
+      <div class="sep guard-only">Охрана</div>
+      <label class="row guard-only">
+        <span>Только человек</span>
+        <input type="checkbox" id="optPerson" checked>
+      </label>
+      <label class="row guard-only">
+        <span>Чувствительность</span>
+        <input type="range" id="optSens" min="4" max="40" step="1" value="12">
+      </label>
+      <label class="row guard-only">
+        <span>Сохранять кадр</span>
+        <input type="checkbox" id="optShots" checked>
+      </label>
+      <div class="row guard-only"><span>Тревог</span><b id="guardCount">0</b></div>
+      <p class="hint guard-only">Снимки лежат в ~/.local/share/yeahtrack/guard</p>
 
       <div class="sep">Вид</div>
       <label class="row">

@@ -4,6 +4,7 @@
 Ввод идёт через org.gnome.Mutter.RemoteDesktop — штатный путь GNOME Wayland,
 без root и без ydotool. Оттуда же берутся мышь и колесо прокрутки.
 """
+import base64
 import json
 import os
 import subprocess
@@ -17,8 +18,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / 'config.json'
 # История живёт рядом с настройками пользователя, а не в репозитории
-HISTORY_PATH = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) \
-    / 'yeahtrack' / 'workouts.json'
+DATA_DIR = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) / 'yeahtrack'
+HISTORY_PATH = DATA_DIR / 'workouts.json'
+GUARD_DIR = DATA_DIR / 'guard'
+MAX_SHOT = 6 * 1024 * 1024        # снимок больше шести мегабайт не принимаем
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8010
 
 # --- клавиши ---------------------------------------------------------------
@@ -92,6 +95,21 @@ DEFAULT_CONFIG = {
     },
     'mouse': {'enabled': False, 'gain': 1700, 'scrollGain': 1.0, 'smooth': 0.45},
     'idle': {'afterSec': 5, 'fps': 4},
+    'posture': {
+        'fps': 3,               # осанке хватает трёх кадров в секунду
+        'slouch': 0.12,         # на столько может просесть шея от твоей нормы
+        'tiltDeg': 8,           # перекос плеч в градусах
+        'holdSec': 8,           # столько надо просидеть криво, прежде чем скажем
+        'cooldownSec': 600,     # и не чаще раза в десять минут
+        'voice': False,
+    },
+    'guard': {
+        'armSec': 15,           # столько на то, чтобы уйти из кадра
+        'sensitivity': 12,      # порог различия кадров, меньше — чувствительнее
+        'cooldownSec': 30,      # пауза между снимками
+        'person': True,         # требовать силуэт человека, а не любое движение
+        'shots': True,          # сохранять кадр на диск
+    },
     'laid': {
         'media': True,
         'mediaAfter': 0,            # 0 — по первому сгибанию, иначе столько повторений
@@ -322,6 +340,29 @@ def history_summary():
             'last': data[-12:]}
 
 
+# --- охрана ----------------------------------------------------------------
+guard_lock = threading.Lock()
+guard_events = []
+
+
+def save_shot(data_url):
+    """Кладёт кадр из data:URL в файл, возвращает имя или None."""
+    if not data_url or not data_url.startswith('data:image/'):
+        return None
+    try:
+        head, b64 = data_url.split(',', 1)
+        ext = 'jpg' if 'jpeg' in head else 'png'
+        raw = base64.b64decode(b64, validate=True)
+    except Exception:                                  # noqa: BLE001
+        return None
+    if len(raw) > MAX_SHOT:
+        return None
+    GUARD_DIR.mkdir(parents=True, exist_ok=True)
+    name = time.strftime('%Y%m%d-%H%M%S') + f'.{ext}'
+    (GUARD_DIR / name).write_bytes(raw)
+    return name
+
+
 injector = Injector()
 
 heartbeat = {'t': 0.0, 'fps': 0, 'hands': 0, 'camera': False, 'note': ''}
@@ -338,9 +379,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _body(self):
+    def _body(self, limit=4096):
         length = int(self.headers.get('Content-Length') or 0)
-        if length > 4096:
+        if length > limit:
             raise ValueError('слишком большое тело')
         return json.loads(self.rfile.read(length) or b'{}')
 
@@ -359,6 +400,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, st)
         if path == '/history':
             return self._json(200, history_summary())
+        if path == '/guard':
+            with guard_lock:
+                return self._json(200, {'events': guard_events[-40:],
+                                        'dir': str(GUARD_DIR)})
         if path == '/config':
             return self._json(200, {'config': config, 'error': config_error})
         return super().do_GET()
@@ -366,8 +411,12 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split('?')[0]
         try:
-            data = self._body() if path in ('/action', '/pointer', '/heartbeat',
-                                            '/osd', '/workout') else {}
+            if path == '/guard':
+                data = self._body(MAX_SHOT * 2)        # base64 раздувает примерно на треть
+            elif path in ('/action', '/pointer', '/heartbeat', '/osd', '/workout'):
+                data = self._body()
+            else:
+                data = {}
         except Exception as e:                         # noqa: BLE001
             return self._json(400, {'ok': False, 'reason': str(e)})
 
@@ -401,6 +450,18 @@ class Handler(SimpleHTTPRequestHandler):
             print(f'✓ подход: {entry["exercise"]} × {reps}  (всего записей {total})',
                   flush=True)
             return self._json(200, {'ok': True, 'saved': entry})
+
+        if path == '/guard':
+            reason = str(data.get('reason') or 'движение')[:60]
+            shot = save_shot(data.get('image'))
+            event = {'at': time.strftime('%Y-%m-%d %H:%M:%S'),
+                     'reason': reason, 'shot': shot}
+            with guard_lock:
+                guard_events.append(event)
+                del guard_events[:-200]
+            injector.osd.show(f'Охрана: {reason}')
+            print(f'! охрана: {reason}' + (f'  → {shot}' if shot else ''), flush=True)
+            return self._json(200, {'ok': True, 'event': event})
 
         if path == '/osd':
             text = str(data.get('text') or '')[:120]
