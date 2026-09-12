@@ -5,7 +5,8 @@ cd "$(dirname "$0")"
 
 VERSION=0.10.14
 CDN="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@$VERSION"
-MODEL="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+HAND="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+POSE="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
 
 mkdir -p vendor/wasm models
 echo "MediaPipe $VERSION…"
@@ -15,7 +16,9 @@ for f in vision_wasm_internal.js vision_wasm_internal.wasm \
   curl -sfL -o "vendor/wasm/$f" "$CDN/wasm/$f"
 done
 echo "модель кисти…"
-curl -sfL -o models/hand_landmarker.task "$MODEL"
+curl -sfL -o models/hand_landmarker.task "$HAND"
+echo "модель скелета (режим Дэвида Лэйда)…"
+curl -sfL -o models/pose_landmarker_lite.task "$POSE"
 
 du -sh vendor models
 echo "готово"

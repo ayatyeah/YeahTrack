@@ -18,8 +18,22 @@
       <span class="pill" id="bridge">мост: …</span>
     </div>
 
+    <div class="counter" id="counter" hidden>
+      <div class="reps" id="reps">0</div>
+      <div class="reps-label">повторений</div>
+      <div class="arms">
+        <span><b id="repsLeft">0</b> левая</span>
+        <span><b id="repsRight">0</b> правая</span>
+      </div>
+      <div class="phase" id="phase">встань в кадр по пояс</div>
+    </div>
+
     <div class="panel" id="panel">
       <h1>YeahTrack</h1>
+      <div class="modes">
+        <button class="mode on" id="modeGestures" data-mode="gestures">Жесты</button>
+        <button class="mode" id="modeLaid" data-mode="laid">Дэвид Лэйд</button>
+      </div>
       <label class="row">
         <span>Скелет</span>
         <input type="checkbox" id="optSkeleton" checked>
@@ -69,6 +83,17 @@
       <button id="compactBtn" class="secondary">Компактно поверх всех</button>
       <p class="hint">Закреплённое окно не уезжает со столом. Компактное не
       закрывает вид, иначе смены стола не видно.</p>
+      <div class="sep laid-only">Подъёмы на бицепс</div>
+      <label class="row laid-only">
+        <span>Только со снарядом</span>
+        <input type="checkbox" id="optGrip" checked>
+      </label>
+      <label class="row laid-only">
+        <span>Строгая амплитуда</span>
+        <input type="checkbox" id="optStrict" checked>
+      </label>
+      <button id="resetReps" class="secondary laid-only">Обнулить счёт</button>
+
       <div class="sep">Вид</div>
       <label class="row">
         <span>Зеркало</span>

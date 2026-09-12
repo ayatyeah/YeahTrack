@@ -76,6 +76,7 @@ AXIS_VERTICAL, AXIS_HORIZONTAL = 0, 1
 # --- конфигурация ----------------------------------------------------------
 DEFAULT_CONFIG = {
     'osd': True,
+    'mode': 'gestures',                                # или 'laid' — счёт подъёмов
     'gestures': {
         # ключ — движение кисти, значение — действие из ACTIONS
         'swipe-left':  'workspace-right',
@@ -308,7 +309,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split('?')[0]
         try:
-            data = self._body() if path in ('/action', '/pointer', '/heartbeat') else {}
+            data = self._body() if path in ('/action', '/pointer', '/heartbeat',
+                                            '/osd') else {}
         except Exception as e:                         # noqa: BLE001
             return self._json(400, {'ok': False, 'reason': str(e)})
 
@@ -323,6 +325,11 @@ class Handler(SimpleHTTPRequestHandler):
                              hands=int(data.get('hands') or 0),
                              camera=bool(data.get('camera')),
                              note=str(data.get('note') or '')[:200])
+            return self._json(200, {'ok': True})
+
+        if path == '/osd':
+            text = str(data.get('text') or '')[:120]
+            injector.osd.show(text)
             return self._json(200, {'ok': True})
 
         if path == '/pointer':

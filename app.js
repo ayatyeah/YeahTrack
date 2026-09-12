@@ -1,4 +1,4 @@
-import { FilesetResolver, HandLandmarker } from './vendor/vision_bundle.mjs';
+import { FilesetResolver, HandLandmarker, PoseLandmarker } from './vendor/vision_bundle.mjs';
 
 const video   = document.getElementById('video');
 const canvas  = document.getElementById('overlay');
@@ -53,6 +53,7 @@ async function loadConfig() {
     console.warn('конфиг не прочитан, работаю на значениях по умолчанию', e);
   }
   if (opt.mouse) opt.mouse.checked = !!cfg.mouse.enabled;
+  if (cfg.mode === 'laid') setMode('laid');
 }
 
 const opt = {
@@ -70,7 +71,15 @@ const opt = {
   seq:      document.getElementById('optSeq'),
   snap:     document.getElementById('optSnap'),
   mouse:    document.getElementById('optMouse'),
+  grip:     document.getElementById('optGrip'),
+  strict:   document.getElementById('optStrict'),
 };
+
+const counterEl  = document.getElementById('counter');
+const repsEl     = document.getElementById('reps');
+const repsLeftEl = document.getElementById('repsLeft');
+const repsRightEl= document.getElementById('repsRight');
+const phaseEl    = document.getElementById('phase');
 
 // --- топология кисти -------------------------------------------------------
 const FINGERS = [
@@ -599,7 +608,243 @@ function trackMouse(lms, g) {
   }
 }
 
+// --- режим Дэвида Лэйда: счёт подъёмов на бицепс ----------------------------
+// Скелет до плеч даёт Pose Landmarker: плечо 11/12, локоть 13/14, запястье 15/16.
+const POSE = { LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16, LH: 23, RH: 24 };
+
+const ANGLE_DOWN = 150;   // градусов: рука выпрямлена
+const ANGLE_UP   = 62;    // согнута до пика
+const GRIP_TTL   = 1400;  // мс: столько помним, что кисть сжата на снаряде
+const ELBOW_DRIFT = 0.11; // доля кадра: дальше локоть уехал от корпуса — читинг
+
+let poseLandmarker = null;
+let poseLoading = null;
+let lastPose = null;
+let poseFrame = 0;
+
+const curl = {
+  left:  { phase: 'down', reps: 0, peak: 180, cheat: false, gripAt: 0 },
+  right: { phase: 'down', reps: 0, peak: 180, cheat: false, gripAt: 0 },
+  total: 0,
+  note: '',
+};
+
+function loadPose() {
+  if (poseLandmarker) return Promise.resolve(poseLandmarker);
+  if (poseLoading) return poseLoading;
+  poseLoading = (async () => {
+    const fileset = await FilesetResolver.forVisionTasks('./vendor/wasm');
+    const make = delegate => PoseLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: './models/pose_landmarker_lite.task', delegate },
+      runningMode: 'VIDEO',
+      numPoses: 1,
+    });
+    try {
+      poseLandmarker = await make(DAEMON ? 'CPU' : 'GPU');
+    } catch (e) {
+      console.warn('скелет на GPU не пошёл, беру CPU', e);
+      poseLandmarker = await make('CPU');
+    }
+    return poseLandmarker;
+  })();
+  return poseLoading;
+}
+
+// угол в вершине b, в градусах
+function angleAt(a, b, c) {
+  const v1x = a.x - b.x, v1y = a.y - b.y;
+  const v2x = c.x - b.x, v2y = c.y - b.y;
+  const n1 = Math.hypot(v1x, v1y), n2 = Math.hypot(v2x, v2y);
+  if (!n1 || !n2) return 180;
+  const cos = Math.min(Math.max((v1x * v2x + v1y * v2y) / (n1 * n2), -1), 1);
+  return Math.acos(cos) * 180 / Math.PI;
+}
+
+const visible = lm => lm && (lm.visibility === undefined || lm.visibility > 0.5);
+
+// снаряд в руке напрямую не разглядеть: моделей на гантели нет.
+// Признак — сжатый кулак у того же запястья, что и рука на скелете.
+function markGrips(hands, pose) {
+  if (!pose) return;
+  const now = performance.now();
+  for (const lms of hands) {
+    if (gestureOf(lms).seqPose !== 'fist') continue;
+    const w = lms[0];
+    const dl = d2(w, pose[POSE.LW]), dr = d2(w, pose[POSE.RW]);
+    const near = Math.min(dl, dr);
+    if (near > 0.2) continue;                         // кисть не у запястья скелета
+    // запястья рядом — не гадаем, какой руке засчитать хват, засчитываем обеим
+    if (Math.abs(dl - dr) < near * 0.5) {
+      curl.left.gripAt = curl.right.gripAt = now;
+    } else {
+      curl[dl < dr ? 'left' : 'right'].gripAt = now;
+    }
+  }
+}
+
+function countArm(side, pose) {
+  const [S, E, W] = side === 'left'
+    ? [POSE.LS, POSE.LE, POSE.LW]
+    : [POSE.RS, POSE.RE, POSE.RW];
+  const arm = curl[side];
+  if (!visible(pose[S]) || !visible(pose[E]) || !visible(pose[W])) return null;
+
+  const angle = angleAt(pose[S], pose[E], pose[W]);
+  const now = performance.now();
+
+  // локоть должен стоять под плечом: иначе это раскачка корпусом
+  if (Math.abs(pose[E].x - pose[S].x) > ELBOW_DRIFT) arm.cheat = true;
+
+  if (arm.phase === 'down') {
+    if (angle < ANGLE_UP) {
+      arm.phase = 'up';
+      arm.peak = angle;
+    }
+  } else {
+    arm.peak = Math.min(arm.peak, angle);
+    if (angle > ANGLE_DOWN) {
+      arm.phase = 'down';
+      const gripOk = !opt.grip.checked || now - arm.gripAt < GRIP_TTL;
+      const formOk = !opt.strict.checked || !arm.cheat;
+      if (!gripOk) curl.note = 'не вижу снаряда в кулаке';
+      else if (!formOk) curl.note = 'читинг: локоть гуляет';
+      else {
+        arm.reps++;
+        curl.total++;
+        onRep(side);
+      }
+      arm.cheat = false;
+      arm.peak = 180;
+    }
+  }
+  return angle;
+}
+
+function onRep(side) {
+  curl.note = side === 'left' ? 'левая, зачтено' : 'правая, зачтено';
+  counterEl.classList.add('hit');
+  setTimeout(() => counterEl.classList.remove('hit'), 130);
+  if (curl.total % 5 === 0) osdSay(`${curl.total} подъёмов`);
+}
+
+function osdSay(text) {
+  // подсказка на экране идёт через мост: видно на любом столе
+  fetch('/osd', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  }).catch(() => {});
+}
+
+function resetReps() {
+  for (const side of ['left', 'right']) {
+    Object.assign(curl[side], { phase: 'down', reps: 0, peak: 180, cheat: false, gripAt: 0 });
+  }
+  curl.total = 0;
+  curl.note = 'счёт обнулён';
+  paintCounter();
+}
+
+function paintCounter() {
+  repsEl.textContent = String(curl.total);
+  repsLeftEl.textContent = String(curl.left.reps);
+  repsRightEl.textContent = String(curl.right.reps);
+  phaseEl.textContent = curl.note;
+}
+
+function drawArms(pose, angles) {
+  const dpr = canvas.width / parseFloat(canvas.style.width);
+  const lw = parseFloat(opt.width.value) * dpr;
+  const px = lm => [(opt.mirror.checked ? 1 - lm.x : lm.x) * canvas.width,
+                    lm.y * canvas.height];
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  if (visible(pose[POSE.LS]) && visible(pose[POSE.RS])) {
+    ctx.beginPath();
+    ctx.moveTo(...px(pose[POSE.LS]));
+    ctx.lineTo(...px(pose[POSE.RS]));
+    ctx.strokeStyle = 'rgba(255,255,255,.3)';
+    ctx.lineWidth = lw * 0.7;
+    ctx.stroke();
+  }
+
+  for (const side of ['left', 'right']) {
+    const [S, E, W] = side === 'left'
+      ? [POSE.LS, POSE.LE, POSE.LW]
+      : [POSE.RS, POSE.RE, POSE.RW];
+    if (!visible(pose[S]) || !visible(pose[E]) || !visible(pose[W])) continue;
+
+    const up = curl[side].phase === 'up';
+    ctx.strokeStyle = up ? '#5ce1e6' : 'rgba(255,255,255,.82)';
+    ctx.shadowColor = up ? '#5ce1e6' : 'transparent';
+    ctx.shadowBlur = up ? lw * 2.4 : 0;
+    ctx.lineWidth = lw * 1.15;
+    ctx.beginPath();
+    ctx.moveTo(...px(pose[S]));
+    ctx.lineTo(...px(pose[E]));
+    ctx.lineTo(...px(pose[W]));
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    for (const i of [S, E, W]) {
+      ctx.beginPath();
+      ctx.arc(...px(pose[i]), lw * 0.8, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+    }
+
+    const a = angles[side];
+    if (a != null) {
+      const [ex, ey] = px(pose[E]);
+      ctx.font = `600 ${13 * dpr}px system-ui, sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = curl[side].cheat ? '#ff9d9d' : 'rgba(255,255,255,.9)';
+      ctx.fillText(`${Math.round(a)}°`, ex + lw * 1.6, ey);
+    }
+  }
+}
+
+function runLaid(drawing) {
+  if (!poseLandmarker) { loadPose(); return; }
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    lastPose = poseLandmarker.detectForVideo(video, performance.now());
+    poseFrame++;
+  }
+  const pose = lastPose?.landmarks?.[0] ?? null;
+  if (!pose) {
+    curl.note = 'встань в кадр по пояс';
+    paintCounter();
+    handsEl.textContent = 'скелет: нет';
+    return;
+  }
+
+  // кисти нужны только для проверки хвата, поэтому смотрим их через кадр
+  if (opt.grip.checked && landmarker && poseFrame % 3 === 0) {
+    const hres = landmarker.detectForVideo(video, performance.now() + 0.5);
+    markGrips(hres?.landmarks ?? [], pose);
+  }
+
+  const angles = { left: countArm('left', pose), right: countArm('right', pose) };
+  if (!curl.note) {
+    const up = curl.left.phase === 'up' || curl.right.phase === 'up';
+    curl.note = up ? 'сгибаешь' : 'опусти до конца';
+  }
+  paintCounter();
+  curl.note = '';
+  if (drawing) drawArms(pose, angles);
+
+  lastHandAt = performance.now();           // в этом режиме дремать нельзя
+  handsEl.textContent = `угол ${[angles.left, angles.right]
+    .filter(a => a != null).map(a => Math.round(a) + '°').join(' / ') || '—'}`;
+  gestEl.textContent = `подъёмов: ${curl.total}`;
+}
+
 // --- главный цикл ----------------------------------------------------------
+let mode = 'gestures';
 let lastHandAt = 0;
 function nextFrame() {
   // пустой кадр не стоит тридцати проверок в секунду: дремлем, пока рук нет
@@ -626,6 +871,12 @@ function loop() {
       ctx.fillStyle = '#07080c';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
+  }
+
+  if (mode === 'laid') {
+    runLaid(drawing);
+    tickFps();
+    return;
   }
 
   if (video.currentTime !== lastVideoTime) {
@@ -659,6 +910,13 @@ function loop() {
   trackSnap(hands[0] || null);
   trackMouse(hands[0] || null, primary);
 
+  lastHands = hands.length;
+  handsEl.textContent = `рук: ${hands.length}`;
+  gestEl.textContent = gestures.length ? gestures.join(' + ') : '—';
+  tickFps();
+}
+
+function tickFps() {
   const now = performance.now();
   // таймер в headless бывает грубым: без нижней границы dt даёт бесконечность
   const dt = Math.max(now - lastFrameTs, 1);
@@ -669,9 +927,6 @@ function loop() {
     : inst;
   fpsEl.textContent = `${fpsSmoothed.toFixed(0)} FPS`;
   frameCount++;
-  lastHands = hands.length;
-  handsEl.textContent = `рук: ${hands.length}`;
-  gestEl.textContent = gestures.length ? gestures.join(' + ') : '—';
 }
 
 // --- события ---------------------------------------------------------------
@@ -693,6 +948,34 @@ compactBtn.addEventListener('click', async () => {
   await fireAction('unmaximize', 'окно свёрнуто из максимума');
   await fireAction('window-above', 'поверх всех окон переключено');
 });
+
+const modeBtns = Array.from(document.querySelectorAll('.mode'));
+async function setMode(next) {
+  if (mode === next) return;
+  mode = next;
+  document.body.classList.toggle('mode-laid', mode === 'laid');
+  counterEl.hidden = mode !== 'laid';
+  modeBtns.forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  lastVideoTime = -1;                       // модели считают кадры по времени
+  if (mode !== 'laid') {
+    toast('режим жестов');
+    return;
+  }
+  mouseRelease();                           // в качалке мышь не нужна
+  resetSwipe();
+  curl.note = 'гружу скелет…';
+  paintCounter();
+  try {
+    await loadPose();
+    curl.note = 'встань в кадр по пояс';
+  } catch (e) {
+    curl.note = `скелет не загрузился: ${e.message}`;
+  }
+  paintCounter();
+}
+
+modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+document.getElementById('resetReps').addEventListener('click', resetReps);
 
 opt.mouse.addEventListener('change', () => {
   cfg.mouse.enabled = opt.mouse.checked;
