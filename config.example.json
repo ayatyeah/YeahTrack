@@ -1,0 +1,24 @@
+{
+  "osd": true,
+
+  "gestures": {
+    "swipe-left": "workspace-right",
+    "swipe-right": "workspace-left",
+    "swipe-up": "volume-up",
+    "swipe-down": "volume-down",
+    "fist-palm": "overview",
+    "snap": "close-tab"
+  },
+
+  "mouse": {
+    "enabled": false,
+    "gain": 1700,
+    "scrollGain": 1.0,
+    "smooth": 0.45
+  },
+
+  "idle": {
+    "afterSec": 5,
+    "fps": 4
+  }
+}

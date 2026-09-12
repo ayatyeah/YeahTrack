@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YeahTrack — трекинг рук</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="stage" id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div class="hud" id="hud">
+      <span class="pill" id="fps">-- FPS</span>
+      <span class="pill" id="hands">рук: 0</span>
+      <span class="pill" id="gesture">—</span>
+      <span class="pill" id="bridge">мост: …</span>
+    </div>
+
+    <div class="panel" id="panel">
+      <h1>YeahTrack</h1>
+      <label class="row">
+        <span>Скелет</span>
+        <input type="checkbox" id="optSkeleton" checked>
+      </label>
+      <label class="row">
+        <span>Заливка ладони</span>
+        <input type="checkbox" id="optPalm" checked>
+      </label>
+      <label class="row">
+        <span>Точки</span>
+        <input type="checkbox" id="optPoints" checked>
+      </label>
+      <label class="row">
+        <span>Номера точек</span>
+        <input type="checkbox" id="optIds">
+      </label>
+      <label class="row">
+        <span>Шлейф пальцев</span>
+        <input type="checkbox" id="optTrail" checked>
+      </label>
+      <div class="sep">Жесты</div>
+      <label class="row">
+        <span>Свайп 3 пальцами</span>
+        <input type="checkbox" id="optSwipe" checked>
+      </label>
+      <label class="row">
+        <span>Инвертировать</span>
+        <input type="checkbox" id="optInvert">
+      </label>
+      <label class="row">
+        <span>Порог</span>
+        <input type="range" id="optThresh" min="0.06" max="0.34" step="0.01" value="0.15">
+      </label>
+      <label class="row">
+        <span>Мышь рукой</span>
+        <input type="checkbox" id="optMouse">
+      </label>
+      <label class="row">
+        <span>Щелчок = закрыть окно</span>
+        <input type="checkbox" id="optSnap" checked>
+      </label>
+      <label class="row">
+        <span>Кулак → ладонь = Super</span>
+        <input type="checkbox" id="optSeq" checked>
+      </label>
+      <button id="pinBtn" class="secondary">Окно на все столы</button>
+      <button id="compactBtn" class="secondary">Компактно поверх всех</button>
+      <p class="hint">Закреплённое окно не уезжает со столом. Компактное не
+      закрывает вид, иначе смены стола не видно.</p>
+      <div class="sep">Вид</div>
+      <label class="row">
+        <span>Зеркало</span>
+        <input type="checkbox" id="optMirror" checked>
+      </label>
+      <label class="row">
+        <span>Видео</span>
+        <input type="checkbox" id="optVideo" checked>
+      </label>
+      <label class="row">
+        <span>Толщина</span>
+        <input type="range" id="optWidth" min="1" max="12" step="0.5" value="5">
+      </label>
+      <div class="row">
+        <select id="cameraSelect"></select>
+      </div>
+      <button id="startBtn">Включить камеру</button>
+      <p class="hint">H — спрятать панель</p>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <div class="splash" id="splash">
+      <div class="splash-inner">
+        <div class="spinner"></div>
+        <p id="splashText">Загружаю модель…</p>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

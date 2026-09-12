@@ -1,0 +1,20 @@
+[Unit]
+Description=YeahTrack: фоновый трекер рук (headless-браузер)
+After=yeahtrack.service
+Requires=yeahtrack.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=@DIR@
+ExecStart=@DIR@/daemon.sh @PORT@
+# flatpak уводит браузер в свой scope, поэтому добиваем его по профилю
+ExecStopPost=@DIR@/stop-daemon.sh
+Restart=always
+RestartSec=5
+# камеру стримит только один процесс: пока служба жива, обычная страница её не получит
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

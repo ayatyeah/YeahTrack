@@ -1,0 +1,9 @@
+# Скачивается fetch-assets.sh, в репозитории держать незачем
+vendor/
+models/
+
+# Личные настройки: образец лежит в config.example.json
+config.json
+
+__pycache__/
+*.pyc
