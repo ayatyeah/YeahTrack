@@ -32,6 +32,7 @@ const cfg = {
   idle: { afterSec: 5, fps: 4 },
   posture: { fps: 3, slouch: 0.12, tiltDeg: 8, holdSec: 8, cooldownSec: 600, voice: false },
   guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
+  wow: { gravity: 1400, bounce: 0.45 },
   edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true, fx: [] },
   laid: {
     media: true,
@@ -86,6 +87,8 @@ async function loadConfig() {
   if (typeof cfg.edit?.seconds === 'number') opt.editSec.value = String(cfg.edit.seconds);
   if (cfg.edit && cfg.edit.vertical === false) opt.vertical.checked = false;
   if (cfg.edit && cfg.edit.faceTrack === false) opt.faceTrack.checked = false;
+  if (typeof cfg.wow?.gravity === 'number') opt.gravity.value = String(cfg.wow.gravity);
+  if (typeof cfg.wow?.bounce === 'number') opt.bounce.value = String(cfg.wow.bounce);
   for (const key of cfg.edit?.fx ?? []) {
     if (!FX[key]) continue;
     fxOn.add(key);
@@ -124,6 +127,9 @@ const opt = {
   editSec:  document.getElementById('optEditSec'),
   faceTrack: document.getElementById('optFaceTrack'),
   vertical: document.getElementById('optVertical'),
+  gravity:  document.getElementById('optGravity'),
+  bounce:   document.getElementById('optBounce'),
+  snapShape: document.getElementById('optSnapShape'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -141,6 +147,9 @@ const editPresetSel  = document.getElementById('editPreset');
 const editRecBtn     = document.getElementById('editRec');
 const editSaveEl     = document.getElementById('editSave');
 const editMusicEl    = document.getElementById('editMusic');
+const shapeCountEl   = document.getElementById('shapeCount');
+const wowRecBtn      = document.getElementById('wowRec');
+const wowSaveEl      = document.getElementById('wowSave');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -1540,6 +1549,9 @@ const edit = {
   energy: 0,
   avg: 0,
   recorder: null,
+  recSource: null,
+  recBtn: null,
+  recLink: null,
   chunks: [],
   stopAt: 0,
   url: null,
@@ -2185,11 +2197,14 @@ function pickMime() {
   return want.find(t => window.MediaRecorder?.isTypeSupported?.(t)) || '';
 }
 
-function startEditRec() {
+function startEditRec(source, btn, link) {
   if (edit.recorder) return stopEditRec();
   if (!window.MediaRecorder) { say('браузер не умеет запись'); return; }
-  renderEdit(performance.now());                 // холст должен быть готов до захвата
-  const stream = renderCanvas.captureStream(30);
+  edit.recSource = source || renderCanvas;
+  edit.recBtn = btn || editRecBtn;
+  edit.recLink = link || editSaveEl;
+  if (edit.recSource === renderCanvas) renderEdit(performance.now());  // холст должен быть готов
+  const stream = edit.recSource.captureStream(30);
   if (musicDest) for (const t of musicDest.stream.getAudioTracks()) stream.addTrack(t);
   const mime = pickMime();
   try {
@@ -2204,7 +2219,7 @@ function startEditRec() {
   edit.recorder.start(500);
   edit.stopAt = performance.now() + parseFloat(opt.editSec.value) * 1000;
   if (musicEl?.src) { musicEl.currentTime = 0; musicEl.play().catch(() => {}); }
-  editRecBtn.textContent = 'Стоп';
+  edit.recBtn.textContent = 'Стоп';
   counterEl.classList.add('rec');
   say('пишу, работай на камеру');
 }
@@ -2215,7 +2230,7 @@ function stopEditRec() {
   edit.recorder = null;
   edit.stopAt = 0;
   musicEl?.pause();
-  editRecBtn.textContent = 'Записать эдит';
+  if (edit.recBtn) edit.recBtn.textContent = edit.recBtn === wowRecBtn ? 'Записать' : 'Записать эдит';
   counterEl.classList.remove('rec');
 }
 
@@ -2224,10 +2239,11 @@ function finishEditRec() {
   edit.chunks = [];
   if (edit.url) URL.revokeObjectURL(edit.url);
   edit.url = URL.createObjectURL(blob);
-  editSaveEl.href = edit.url;
-  editSaveEl.download = `edit-${edit.preset}-${Date.now()}.webm`;
-  editSaveEl.hidden = false;
-  editSaveEl.textContent = `Скачать ролик (${(blob.size / 1048576).toFixed(1)} МБ)`;
+  const link = edit.recLink || editSaveEl;
+  link.href = edit.url;
+  link.download = `${link === wowSaveEl ? 'wow' : 'edit-' + edit.preset}-${Date.now()}.webm`;
+  link.hidden = false;
+  link.textContent = `Скачать ролик (${(blob.size / 1048576).toFixed(1)} МБ)`;
   say('готово, ролик можно скачать');
   osdSay('Эдит готов');
 }
@@ -2301,6 +2317,427 @@ function runEdit(drawing) {
   lastHandAt = now;
 }
 
+// --- вау-режим: фигуры из воздуха ------------------------------------------
+// Рисуешь пальцем — штрих распознаётся и превращается в ровную фигуру.
+// Фигуры живые: падают, сталкиваются, их можно схватить кулаком и бросить.
+const SHAPE_MIN_PTS = 12;
+const SHAPE_MIN_SIZE = 46;      // px: меньше — случайный тык, а не фигура
+const FRAME_HOLD = 450;         // мс удержания «уголков» до прямоугольника
+const GRAB_RADIUS = 1.25;       // радиусы фигуры, в пределах которых кулак хватает
+const CLAP_DIST = 0.13;         // доля ширины кадра между ладонями
+
+const wow = {
+  shapes: [],
+  stroke: [],
+  drawing: false,
+  frameSince: 0,
+  framePreview: null,
+  clapAt: 0,
+  grabbed: new Map(),           // рука → фигура
+  lastAt: 0,
+  hint: '',
+};
+
+const SHAPE_HUES = { circle: 190, rect: 275, tri: 45, line: 140, poly: 320 };
+
+// --- распознавание штриха --------------------------------------------------
+function strokeBox(pts) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) {
+    if (p.x < x0) x0 = p.x;
+    if (p.x > x1) x1 = p.x;
+    if (p.y < y0) y0 = p.y;
+    if (p.y > y1) y1 = p.y;
+  }
+  return { x0, y0, x1, y1, w: x1 - x0, h: y1 - y0 };
+}
+
+// Рамер-Дуглас-Пекер: выкидываем точки, которые почти лежат на хорде.
+// Сколько вершин осталось — столько углов у фигуры.
+function simplify(pts, eps) {
+  if (pts.length < 3) return pts.slice();
+  const [a, b] = [pts[0], pts[pts.length - 1]];
+  let far = 0, idx = -1;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = Math.abs((pts[i].x - a.x) * dy - (pts[i].y - a.y) * dx) / len;
+    if (d > far) { far = d; idx = i; }
+  }
+  if (far <= eps || idx < 0) return [a, b];
+  return simplify(pts.slice(0, idx + 1), eps)
+    .slice(0, -1)
+    .concat(simplify(pts.slice(idx), eps));
+}
+
+// На замкнутом штрихе первая и последняя точки совпадают, хорда нулевая,
+// и обычный Дуглас-Пекер выкидывает вообще все вершины. Поэтому рвём контур
+// в самой дальней от начала точке и упрощаем две половины по отдельности.
+function simplifyClosed(pts, eps) {
+  const a = pts[0];
+  let idx = 1, far = -1;
+  for (let i = 1; i < pts.length; i++) {
+    const d = Math.hypot(pts[i].x - a.x, pts[i].y - a.y);
+    if (d > far) { far = d; idx = i; }
+  }
+  const head = simplify(pts.slice(0, idx + 1), eps);
+  const tail = simplify(pts.slice(idx), eps);
+  return head.slice(0, -1).concat(tail);
+}
+
+// Точка разрыва сама попадает в вершины, хотя углом не является.
+// Выкидываем всё, где поворот слишком мал.
+function dropStraight(poly, minTurn = 32) {
+  const closed = poly.length > 2;
+  const v = closed ? poly.slice(0, -1) : poly.slice();
+  if (v.length < 4) return v;
+  const out = [];
+  for (let i = 0; i < v.length; i++) {
+    const p = v[(i - 1 + v.length) % v.length], c = v[i], n = v[(i + 1) % v.length];
+    const a1 = Math.atan2(c.y - p.y, c.x - p.x);
+    const a2 = Math.atan2(n.y - c.y, n.x - c.x);
+    let turn = Math.abs((a2 - a1) * 180 / Math.PI) % 360;
+    if (turn > 180) turn = 360 - turn;
+    if (turn >= minTurn) out.push(c);
+  }
+  return out.length >= 3 ? out : v;
+}
+
+function recognize(pts) {
+  const box = strokeBox(pts);
+  const diag = Math.hypot(box.w, box.h);
+  if (pts.length < SHAPE_MIN_PTS || Math.max(box.w, box.h) < SHAPE_MIN_SIZE) return null;
+
+  const first = pts[0], last = pts[pts.length - 1];
+  const closed = Math.hypot(last.x - first.x, last.y - first.y) < diag * 0.38;
+  const cx = (box.x0 + box.x1) / 2, cy = (box.y0 + box.y1) / 2;
+
+  if (!closed) {
+    // почти прямая — это линия, а не кривая
+    const dev = pts.reduce((m, p) => {
+      const dxl = last.x - first.x, dyl = last.y - first.y;
+      const l = Math.hypot(dxl, dyl) || 1;
+      return Math.max(m, Math.abs((p.x - first.x) * dyl - (p.y - first.y) * dxl) / l);
+    }, 0);
+    if (dev < diag * 0.16) {
+      return { kind: 'line', x: cx, y: cy, r: Math.hypot(last.x - first.x, last.y - first.y) / 2,
+               ax: first.x - cx, ay: first.y - cy, bx: last.x - cx, by: last.y - cy };
+    }
+  }
+
+  // Круг: все точки примерно на одном расстоянии от центра. Порог взят
+  // из замеров: круг от руки даёт разброс до 0.05, квадрат 0.115,
+  // прямоугольник 0.26, треугольник 0.31.
+  const rs = pts.map(p => Math.hypot(p.x - cx, p.y - cy));
+  const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
+  const dev = Math.sqrt(rs.reduce((a, r) => a + (r - mean) ** 2, 0) / rs.length) / (mean || 1);
+  if (closed && dev < 0.075) return { kind: 'circle', x: cx, y: cy, r: mean };
+
+  const rough = closed ? simplifyClosed(pts, diag * 0.075) : simplify(pts, diag * 0.075);
+  const corners = dropStraight(rough);
+  const n = corners.length;
+  if (closed && n === 3) {
+    return { kind: 'tri', x: cx, y: cy, r: Math.max(box.w, box.h) / 2,
+             pts: corners.map(p => ({ x: p.x - cx, y: p.y - cy })) };
+  }
+  if (closed && n >= 4 && n <= 6) {
+    return { kind: 'rect', x: cx, y: cy, w: box.w, h: box.h,
+             r: Math.hypot(box.w, box.h) / 2 };
+  }
+  if (closed) return { kind: 'circle', x: cx, y: cy, r: mean };
+  return null;
+}
+
+function addShape(def) {
+  const hue = SHAPE_HUES[def.kind] ?? 200;
+  wow.shapes.push({
+    angle: 0, va: (Math.random() - 0.5) * 1.2, vx: 0, vy: 0,
+    hue, born: performance.now(), ...def,
+  });
+  if (wow.shapes.length > 40) wow.shapes.shift();
+  for (let k = 0; k < 90; k++) {
+    const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 260;
+    spawn(def.x, def.y, Math.cos(a) * sp, Math.sin(a) * sp,
+          { max: 620, size: 2 + Math.random() * 2, hue, grav: 200 });
+  }
+  wow.hint = { circle: 'круг', rect: 'прямоугольник', tri: 'треугольник',
+               line: 'линия', poly: 'фигура' }[def.kind] + ' готов';
+}
+
+// --- физика ----------------------------------------------------------------
+function stepShapes(dt, W, H) {
+  const g = parseFloat(opt.gravity.value);
+  const bounce = parseFloat(opt.bounce.value);
+  const s = dt / 1000;
+
+  for (const sh of wow.shapes) {
+    if (sh.held) continue;                       // в руке физика не нужна
+    sh.vy += g * s;
+    sh.x += sh.vx * s;
+    sh.y += sh.vy * s;
+    sh.angle += sh.va * s;
+
+    if (sh.y + sh.r > H) { sh.y = H - sh.r; sh.vy = -sh.vy * bounce; sh.vx *= 0.92; sh.va *= 0.9; }
+    if (sh.y - sh.r < 0) { sh.y = sh.r; sh.vy = -sh.vy * bounce; }
+    if (sh.x - sh.r < 0) { sh.x = sh.r; sh.vx = -sh.vx * bounce; }
+    if (sh.x + sh.r > W) { sh.x = W - sh.r; sh.vx = -sh.vx * bounce; }
+  }
+
+  // столкновения считаем по описанным окружностям: дёшево и выглядит честно
+  for (let i = 0; i < wow.shapes.length; i++) {
+    for (let j = i + 1; j < wow.shapes.length; j++) {
+      const a = wow.shapes[i], b = wow.shapes[j];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.hypot(dx, dy) || 0.01;
+      const overlap = a.r + b.r - dist;
+      if (overlap <= 0) continue;
+      const nx = dx / dist, ny = dy / dist;
+      const push = overlap / 2;
+      if (!a.held) { a.x -= nx * push; a.y -= ny * push; }
+      if (!b.held) { b.x += nx * push; b.y += ny * push; }
+      const rel = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+      if (rel > 0) continue;
+      const imp = -rel * (0.5 + bounce / 2);
+      if (!a.held) { a.vx -= imp * nx; a.vy -= imp * ny; }
+      if (!b.held) { b.vx += imp * nx; b.vy += imp * ny; }
+      a.va += (Math.random() - 0.5) * 0.4;
+      b.va += (Math.random() - 0.5) * 0.4;
+    }
+  }
+}
+
+function shockwave(x, y, W) {
+  for (const sh of wow.shapes) {
+    const dx = sh.x - x, dy = sh.y - y;
+    const d = Math.hypot(dx, dy) || 1;
+    const power = Math.max(1 - d / (W * 0.9), 0.15) * 1700;
+    sh.vx += (dx / d) * power;
+    sh.vy += (dy / d) * power - 220;
+    sh.va += (Math.random() - 0.5) * 6;
+    sh.held = false;
+  }
+  for (let k = 0; k < 320; k++) {
+    const a = Math.random() * Math.PI * 2, sp = 300 + Math.random() * 900;
+    spawn(x, y, Math.cos(a) * sp, Math.sin(a) * sp,
+          { max: 620, size: 2 + Math.random() * 3, hue: 190 + Math.random() * 60, grav: 300 });
+  }
+}
+
+// --- отрисовка -------------------------------------------------------------
+function drawShape(sh) {
+  ctx.save();
+  ctx.translate(sh.x, sh.y);
+  ctx.rotate(sh.angle);
+  const col = `hsl(${sh.hue}, 100%, 65%)`;
+  ctx.strokeStyle = col;
+  ctx.fillStyle = `hsla(${sh.hue}, 100%, 60%, ${sh.held ? 0.28 : 0.14})`;
+  ctx.lineWidth = sh.held ? 5 : 3.2;
+  ctx.shadowColor = col;
+  ctx.shadowBlur = sh.held ? 34 : 20;
+  ctx.beginPath();
+  if (sh.kind === 'circle') {
+    ctx.arc(0, 0, sh.r, 0, Math.PI * 2);
+  } else if (sh.kind === 'rect') {
+    ctx.rect(-sh.w / 2, -sh.h / 2, sh.w, sh.h);
+  } else if (sh.kind === 'tri') {
+    sh.pts.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+    ctx.closePath();
+  } else if (sh.kind === 'line') {
+    ctx.moveTo(sh.ax, sh.ay);
+    ctx.lineTo(sh.bx, sh.by);
+  }
+  if (sh.kind !== 'line') ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawStroke() {
+  if (wow.stroke.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = '#5ce1e6';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.shadowColor = '#5ce1e6';
+  ctx.shadowBlur = 26;
+  ctx.beginPath();
+  wow.stroke.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+  ctx.stroke();
+  ctx.restore();
+}
+
+// --- жесты режима ----------------------------------------------------------
+const isL = g => g.thumb && g.ext[0] && !g.ext[1] && !g.ext[2] && !g.ext[3];
+const isPointer = g => g.ext[0] && !g.ext[1] && !g.ext[2] && !g.ext[3];
+
+function runWow(drawing) {
+  const now = performance.now();
+  const dt = Math.min(now - (wow.lastAt || now), 60);
+  wow.lastAt = now;
+
+  if (!landmarker || video.readyState < 2 || !syncCanvas()) return;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  video.classList.toggle('hidden', !opt.video.checked);
+  video.style.transform = opt.mirror.checked
+    ? 'translate(-50%,-50%) scaleX(-1)'
+    : 'translate(-50%,-50%)';
+  if (!opt.video.checked) {
+    ctx.fillStyle = '#07080c';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    window.__last = landmarker.detectForVideo(video, now);
+  }
+  const hands = window.__last?.landmarks ?? [];
+  const W = canvas.width, H = canvas.height;
+  const px = lm => [(opt.mirror.checked ? 1 - lm.x : lm.x) * W, lm.y * H];
+
+  let pointerHand = null;
+  const ls = [];
+
+  hands.forEach((lms, i) => {
+    const g = gestureOf(lms);
+    const [palmX, palmY] = px(lms[9]);
+
+    if (isPointer(g)) pointerHand = lms;
+    if (isL(g)) ls.push({ corner: px(lms[5]) });
+
+    // кулак хватает ближайшую фигуру и таскает её за собой
+    if (g.seqPose === 'fist') {
+      let held = wow.grabbed.get(i);
+      if (!held) {
+        let best = null, bestD = Infinity;
+        for (const sh of wow.shapes) {
+          if (sh.held) continue;
+          const d = Math.hypot(sh.x - palmX, sh.y - palmY);
+          if (d < sh.r * GRAB_RADIUS && d < bestD) { best = sh; bestD = d; }
+        }
+        if (best) {
+          best.held = true;
+          best.grabX = palmX; best.grabY = palmY;
+          wow.grabbed.set(i, best);
+          held = best;
+          wow.hint = 'схватил';
+        }
+      }
+      if (held) {
+        held.vx = (palmX - held.grabX) / (dt / 1000 || 1);
+        held.vy = (palmY - held.grabY) / (dt / 1000 || 1);
+        held.grabX = palmX; held.grabY = palmY;
+        held.x = palmX; held.y = palmY;
+        held.va = held.vx / 400;
+      }
+    } else {
+      const held = wow.grabbed.get(i);
+      if (held) {
+        held.held = false;                 // раскрыл руку — бросок с той же скоростью
+        wow.grabbed.delete(i);
+        wow.hint = 'бросок';
+      }
+    }
+
+    // искры с кончиков, чтобы руки читались в кадре
+    for (const t of [4, 8, 12, 16, 20]) {
+      if (Math.random() > 0.35) continue;
+      const [tx, ty] = px(lms[t]);
+      spawn(tx, ty, (Math.random() - 0.5) * 60, (Math.random() - 0.5) * 60,
+            { max: 360, size: 1.6, hue: 185, grav: 120 });
+    }
+  });
+
+  // рисование указательным
+  if (pointerHand) {
+    const [tx, ty] = px(pointerHand[8]);
+    const last = wow.stroke[wow.stroke.length - 1];
+    if (!last || Math.hypot(tx - last.x, ty - last.y) > 4) wow.stroke.push({ x: tx, y: ty });
+    if (wow.stroke.length > 400) wow.stroke.shift();
+    wow.drawing = true;
+    wow.hint = 'рисуешь';
+  } else if (wow.drawing) {
+    wow.drawing = false;
+    const def = recognize(wow.stroke);
+    if (def) addShape(def);
+    else if (wow.stroke.length > 4) wow.hint = 'не понял фигуру';
+    wow.stroke = [];
+  }
+
+  // два уголка — прямоугольник по диагонали между ними
+  if (ls.length >= 2) {
+    const [a, b] = ls;
+    const rect = { x: (a.corner[0] + b.corner[0]) / 2, y: (a.corner[1] + b.corner[1]) / 2,
+                   w: Math.abs(a.corner[0] - b.corner[0]), h: Math.abs(a.corner[1] - b.corner[1]) };
+    if (!wow.frameSince) wow.frameSince = now;
+    wow.framePreview = rect;
+    wow.hint = 'держи уголки…';
+    if (now - wow.frameSince > FRAME_HOLD && Math.min(rect.w, rect.h) > SHAPE_MIN_SIZE) {
+      addShape({ kind: 'rect', x: rect.x, y: rect.y, w: rect.w, h: rect.h,
+                 r: Math.hypot(rect.w, rect.h) / 2 });
+      wow.frameSince = 0;
+      wow.framePreview = null;
+    }
+  } else {
+    wow.frameSince = 0;
+    wow.framePreview = null;
+  }
+
+  // хлопок — ударная волна
+  if (hands.length >= 2) {
+    const [a, b] = [px(hands[0][9]), px(hands[1][9])];
+    const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (d < W * CLAP_DIST && now - wow.clapAt > 700) {
+      wow.clapAt = now;
+      shockwave((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, W);
+      wow.hint = 'хлопок';
+    }
+  }
+
+  stepShapes(dt, W, H);
+  stepParticles(dt);
+
+  for (const sh of wow.shapes) drawShape(sh);
+  if (wow.framePreview) {
+    const r = wow.framePreview;
+    ctx.save();
+    ctx.setLineDash([12, 10]);
+    ctx.strokeStyle = 'rgba(255,255,255,.7)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(r.x - r.w / 2, r.y - r.h / 2, r.w, r.h);
+    ctx.restore();
+  }
+  drawStroke();
+  drawParticles(ctx);
+
+  if (now - wow.clapAt < 130) {
+    ctx.fillStyle = `rgba(220,245,255,${0.45 * (1 - (now - wow.clapAt) / 130)})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  shapeCountEl.textContent = String(wow.shapes.length);
+  repsEl.textContent = String(wow.shapes.length);
+  repsLeftEl.textContent = `${hands.length} рук`;
+  repsRightEl.textContent = `${parts.length} частиц`;
+  phaseEl.textContent = wow.hint || 'рисуй указательным';
+  handsEl.textContent = `фигур ${wow.shapes.length}`;
+  gestEl.textContent = wow.hint || 'вау-режим';
+  lastHandAt = now;
+}
+
+function clearShapes() {
+  for (const sh of wow.shapes) {
+    for (let k = 0; k < 40; k++) {
+      const a = Math.random() * Math.PI * 2, sp = 100 + Math.random() * 400;
+      spawn(sh.x, sh.y, Math.cos(a) * sp, Math.sin(a) * sp,
+            { max: 560, size: 2, hue: sh.hue, grav: 260 });
+    }
+  }
+  wow.shapes = [];
+  wow.grabbed.clear();
+  wow.hint = 'чисто';
+}
+
 // --- главный цикл ----------------------------------------------------------
 let mode = 'gestures';
 let lastHandAt = 0;
@@ -2339,6 +2776,7 @@ function loop() {
   if (mode === 'posture') { runPosture(drawing); tickFps(); return; }
   if (mode === 'guard') { runGuard(drawing); tickFps(); return; }
   if (mode === 'edit') { runEdit(drawing); tickFps(); return; }
+  if (mode === 'wow') { runWow(drawing); tickFps(); return; }
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -2414,6 +2852,7 @@ const modeBtns = Array.from(document.querySelectorAll('.mode'));
 const MODE_NAMES = {
   gestures: 'режим жестов',
   edit: 'генератор эдитов',
+  wow: 'вау-режим',
   laid: 'режим Дэвида Лэйда',
   posture: 'режим осанки',
   guard: 'режим охраны',
@@ -2422,7 +2861,7 @@ const MODE_NAMES = {
 async function setMode(next) {
   if (mode === next) return;
   mode = next;
-  for (const name of ['laid', 'posture', 'guard', 'edit']) {
+  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow']) {
     document.body.classList.toggle(`mode-${name}`, mode === name);
   }
   counterEl.hidden = mode === 'gestures';
@@ -2439,7 +2878,14 @@ async function setMode(next) {
   resetSwipe();
   if (mode !== 'laid') stopMedia();
 
-  if (mode !== 'edit') stopEditRec();
+  if (mode !== 'edit' && mode !== 'wow') stopEditRec();
+
+  if (mode === 'wow') {
+    wow.stroke = [];
+    wow.lastAt = 0;
+    say('рисуй указательным в воздухе');
+    return;
+  }
 
   if (mode === 'edit') {
     curl.note = 'гружу модель лица…';
@@ -2515,6 +2961,10 @@ for (const [key, f] of Object.entries(FX)) {
 }
 
 editRecBtn.addEventListener('click', () => (edit.recorder ? stopEditRec() : startEditRec()));
+document.getElementById('wowClear').addEventListener('click', clearShapes);
+wowRecBtn.addEventListener('click', () => (edit.recorder
+  ? stopEditRec()
+  : startEditRec(canvas, wowRecBtn, wowSaveEl)));
 editMusicEl.addEventListener('change', () => {
   const f = editMusicEl.files?.[0];
   if (f) loadMusic(f).catch(e => say(`трек не открылся: ${e.message}`));

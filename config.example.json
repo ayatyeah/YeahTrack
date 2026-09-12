@@ -39,6 +39,11 @@
     "fx": []
   },
 
+  "wow": {
+    "gravity": 1400,
+    "bounce": 0.45
+  },
+
   "guard": {
     "armSec": 15,
     "sensitivity": 12,

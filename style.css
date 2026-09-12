@@ -194,3 +194,6 @@ input[type=file]::file-selector-button{
   background:transparent;color:var(--txt);cursor:pointer;font-size:12px;
 }
 .counter.rec .reps{color:#ff6b6b}
+
+body:not(.mode-wow) .wow-only{display:none}
+body.mode-wow .gestures-only{display:none}

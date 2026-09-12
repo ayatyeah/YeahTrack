@@ -37,6 +37,7 @@
         <button class="mode" id="modePosture" data-mode="posture">Режим осанки</button>
         <button class="mode" id="modeGuard" data-mode="guard">Режим охраны</button>
         <button class="mode" id="modeEdit" data-mode="edit">Генератор эдитов</button>
+        <button class="mode" id="modeWow" data-mode="wow">Вау-режим</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -182,6 +183,27 @@
       <a id="editSave" class="secondary edit-only" hidden download>Скачать ролик</a>
       <p class="hint edit-only">Биты берутся из твоего трека. Без музыки
       эффекты идут в ровном темпе.</p>
+
+      <div class="sep wow-only">Фигуры</div>
+      <label class="row wow-only">
+        <span>Тяжесть</span>
+        <input type="range" id="optGravity" min="0" max="2600" step="100" value="1400">
+      </label>
+      <label class="row wow-only">
+        <span>Отскок</span>
+        <input type="range" id="optBounce" min="0" max="0.9" step="0.05" value="0.45">
+      </label>
+      <label class="row wow-only">
+        <span>Прилипать к фигуре</span>
+        <input type="checkbox" id="optSnapShape" checked>
+      </label>
+      <div class="row wow-only"><span>На экране</span><b id="shapeCount">0</b></div>
+      <button id="wowClear" class="secondary wow-only">Убрать все</button>
+      <button id="wowRec" class="wow-only">Записать</button>
+      <a id="wowSave" class="secondary wow-only" hidden download>Скачать ролик</a>
+      <p class="hint wow-only">Указательным рисуй в воздухе. Два уголка
+      из большого и указательного — прямоугольник. Кулак хватает фигуру,
+      раскрытая рука отпускает. Хлопок разбрасывает всё.</p>
 
       <div class="sep">Вид</div>
       <label class="row">
