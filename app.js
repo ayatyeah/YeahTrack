@@ -642,7 +642,12 @@ const DWELL_MS   = 140;   // столько угол должен продерж
 const MIN_REP_MS = 350;   // быстрее — это рывок, а не повторение
 const MERGE_MS   = 700;   // два подъёма подряд — это одно повторение двумя руками
 const GRIP_TTL   = 2500;  // мс: столько помним, что кисть сжата на снаряде
-const ELBOW_DRIFT = 0.5;  // доли длины плеча, а не кадра: дальше — раскачка
+// Это синус наклона плеча от вертикали, больше единицы он не бывает:
+// 0.62 — примерно 38 градусов, дальше локоть уже выносится вперёд.
+const ELBOW_DRIFT = 0.62;
+const CHEAT_FRAMES = 3;   // и не по одному шумному кадру, а подряд
+const MIN_LIMB   = 0.05;  // доля кадра: короче — скелет схлопнулся, угол мусорный
+const STUCK_MS   = 8000;  // столько висеть в «вверх» нельзя, это залипание
 const NOTE_MS    = 1800;  // подсказку надо успеть прочитать
 
 let poseLandmarker = null;
@@ -656,7 +661,9 @@ const freshArm = () => ({
   cand: 0,         // когда угол впервые ушёл за порог: ждём, что он там останется
   upAt: 0,         // начало подъёма, по нему меряем длительность повторения
   cheat: false,
+  bad: 0,          // сколько кадров подряд локоть был не на месте
   gripAt: 0,
+  angle: 180,
 });
 
 const curl = {
@@ -734,13 +741,36 @@ function countArm(side, pose) {
   const arm = curl[side];
   if (!visible(pose[S]) || !visible(pose[E]) || !visible(pose[W])) return null;
 
-  const angle = angleAt(pose[S], pose[E], pose[W]);
   const now = performance.now();
+  const upper = d2(pose[S], pose[E]);
+  const fore = d2(pose[E], pose[W]);
+  // Рука вышла из кадра или смотрит в объектив — звенья схлопываются в точку,
+  // и угол превращается в мусор. Такому кадру не верим вовсе.
+  if (upper < MIN_LIMB || fore < MIN_LIMB) {
+    arm.cand = 0;
+    return null;
+  }
+
+  const angle = angleAt(pose[S], pose[E], pose[W]);
+  arm.angle = angle;
+
+  // Залипнуть в «вверх» нельзя: если разгибание так и не увидели, сбрасываем,
+  // иначе счётчик молчит до конца тренировки.
+  if (arm.phase === 'up' && now - arm.upAt > STUCK_MS) {
+    arm.phase = 'down';
+    arm.cand = 0;
+    arm.cheat = false;
+    say('потерял разгибание, начинаю заново');
+  }
 
   // Локоть должен стоять под плечом. Меряем в длинах плеча, а не в долях
   // кадра: иначе у стоящего близко к камере порог оказывался вдвое строже.
-  const upper = d2(pose[S], pose[E]) || 1e-6;
-  if (Math.abs(pose[E].x - pose[S].x) / upper > ELBOW_DRIFT) arm.cheat = true;
+  // одиночный выброс координат — это шум, а не раскачка: ждём несколько подряд
+  if (Math.abs(pose[E].x - pose[S].x) / upper > ELBOW_DRIFT) {
+    if (++arm.bad >= CHEAT_FRAMES) arm.cheat = true;
+  } else {
+    arm.bad = 0;
+  }
 
   // Точки скелета дрожат, поэтому порог засчитывается не мгновенно:
   // угол должен продержаться за ним DWELL_MS, иначе это шум.
@@ -765,6 +795,7 @@ function countArm(side, pose) {
   const gripOk = !opt.grip.checked || now - arm.gripAt < GRIP_TTL;
   const formOk = !opt.strict.checked || !arm.cheat;
   arm.cheat = false;
+  arm.bad = 0;
 
   if (spent < MIN_REP_MS) say('слишком быстро, это рывок');
   else if (!gripOk) say('не вижу снаряда в кулаке');
@@ -781,6 +812,19 @@ function countArm(side, pose) {
     if (curl.total >= Math.max(cfg.laid.mediaAfter, 1)) startMedia();
   }
   return angle;
+}
+
+// Показываем живые цифры: так сразу видно, до какого угла доходит рука
+// и что мешает засчитать повторение.
+function statusLine(angles) {
+  const part = (label, side) => {
+    const a = angles[side];
+    if (a == null) return `${label} не вижу`;
+    const arm = curl[side];
+    const flag = arm.cheat ? ' локоть!' : '';
+    return `${label} ${Math.round(a)}° ${arm.phase === 'up' ? 'вверх' : 'вниз'}${flag}`;
+  };
+  return `${part('л', 'left')} · ${part('п', 'right')}`;
 }
 
 function onRep(side, together) {
@@ -895,10 +939,7 @@ function runLaid(drawing) {
   }
 
   const angles = { left: countArm('left', pose), right: countArm('right', pose) };
-  if (performance.now() > curl.noteUntil) {
-    const up = curl.left.phase === 'up' || curl.right.phase === 'up';
-    curl.note = up ? 'сгибаешь' : 'опусти до конца';
-  }
+  if (performance.now() > curl.noteUntil) curl.note = statusLine(angles);
   paintCounter();
   if (drawing) drawArms(pose, angles);
 
