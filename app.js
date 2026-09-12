@@ -465,10 +465,12 @@ function trackSequence(pose) {
 
 // --- щелчок пальцами = закрыть свою вкладку --------------------------------
 const SNAP_PINCH  = 0.45;  // доли размера кисти: ближе — щепоть
-const SNAP_DELTA  = 0.45;  // на столько должен разъехаться зазор
+const SNAP_DELTA  = 0.30;  // на столько должен разъехаться зазор
+const SNAP_RATE   = 3.0;   // и не медленнее, чем столько размеров кисти в секунду
 const SNAP_WINDOW = 220;   // мс на срыв, медленнее — это просто разжимание
 const SNAP_COOLDOWN = 2000;
-const snap = { armed: false, at: 0, gap: 0, lastFire: 0 };
+const SNAP_TRAVEL = 0.05;  // доля кадра: щёлкают пальцами, а не всей рукой
+const snap = { armed: false, at: 0, gap: 0, lastFire: 0, wrist: null };
 
 const indexUp = lms => d2(lms[8], lms[0]) > d2(lms[6], lms[0]) * 1.05;
 
@@ -486,12 +488,19 @@ function trackSnap(lms) {
   // указательный поднят: так щелчок не путается с разжиманием кулака
   if (gap < SNAP_PINCH && indexUp(lms)) {
     snap.armed = true; snap.at = now; snap.gap = gap;
+    snap.wrist = { x: lms[0].x, y: lms[0].y };
     return;
   }
   if (!snap.armed) return;
   if (now - snap.at > SNAP_WINDOW) { snap.armed = false; return; }
-  if (gap - snap.gap >= SNAP_DELTA) {
+  const grow = gap - snap.gap;
+  const elapsed = Math.max(now - snap.at, 1) / 1000;
+  // важна не только величина, но и темп: палец срывается, а не разжимается
+  if (grow >= SNAP_DELTA && grow / elapsed >= SNAP_RATE) {
     snap.armed = false;
+    // свайп начинается с раскрытия полусогнутой кисти и внешне похож
+    // на щелчок; отличает его то, что при свайпе едет вся кисть
+    if (snap.wrist && d2(lms[0], snap.wrist) > SNAP_TRAVEL) return;
     snap.lastFire = now;
     fireGesture('snap');
   }
