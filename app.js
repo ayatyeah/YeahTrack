@@ -31,7 +31,7 @@ const cfg = {
   idle: { afterSec: 5, fps: 4 },
   laid: {
     media: true,
-    mediaAfter: 3,            // включаем не с первого движения, а когда подход пошёл
+    mediaAfter: 0,            // 0 — по первому сгибанию, иначе столько зачтённых повторений
     window: false,            // true — отдельные окна браузера вместо панелей по краям
     muteVideo: true,          // звук отдаём плейлисту, иначе всё смешается
     video: 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
@@ -780,7 +780,11 @@ function countArm(side, pose) {
     arm.cand = 0;
     return angle;
   }
-  if (!arm.cand) arm.cand = now;
+  if (!arm.cand) {
+    arm.cand = now;
+    // порог 0 — включаем сразу, как рука пошла вверх, не дожидаясь зачёта
+    if (wantUp && cfg.laid.mediaAfter <= 0) startMedia();
+  }
   if (now - arm.cand < DWELL_MS) return angle;
   arm.cand = 0;
 
@@ -809,7 +813,7 @@ function countArm(side, pose) {
     curl.lastRepAt = now;
     curl.lastRepSide = side;
     onRep(side, together);
-    if (curl.total >= Math.max(cfg.laid.mediaAfter, 1)) startMedia();
+    if (cfg.laid.mediaAfter > 0 && curl.total >= cfg.laid.mediaAfter) startMedia();
   }
   return angle;
 }

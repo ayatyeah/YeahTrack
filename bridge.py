@@ -90,7 +90,7 @@ DEFAULT_CONFIG = {
     'idle': {'afterSec': 5, 'fps': 4},
     'laid': {
         'media': True,
-        'mediaAfter': 3,            # столько чистых повторений до запуска плееров
+        'mediaAfter': 0,            # 0 — по первому сгибанию, иначе столько повторений
         'window': False,            # True — отдельные окна браузера вместо панелей
         'muteVideo': True,          # звук отдаём плейлисту, иначе всё смешается
         'video': 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
