@@ -38,6 +38,7 @@
         <button class="mode" id="modeGuard" data-mode="guard">Режим охраны</button>
         <button class="mode" id="modeEdit" data-mode="edit">Генератор эдитов</button>
         <button class="mode" id="modeWow" data-mode="wow">Вау-режим</button>
+        <button class="mode" id="modeTony" data-mode="tony">Режим Тони</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -204,6 +205,30 @@
       <p class="hint wow-only">Указательным рисуй в воздухе. Два уголка
       из большого и указательного — прямоугольник. Кулак хватает фигуру,
       раскрытая рука отпускает. Хлопок разбрасывает всё.</p>
+
+      <div class="sep tony-only">Голограмма</div>
+      <div class="row tony-only">
+        <select id="holoSel"></select>
+      </div>
+      <label class="row tony-only">
+        <span>Сетка и сканер</span>
+        <input type="checkbox" id="optHud" checked>
+      </label>
+      <label class="row tony-only">
+        <span>Телеметрия</span>
+        <input type="checkbox" id="optTelemetry" checked>
+      </label>
+      <label class="row tony-only">
+        <span>Сам вращается</span>
+        <input type="checkbox" id="optSpin" checked>
+      </label>
+      <div class="row tony-only"><span>Масштаб</span><b id="holoScale">1.00</b></div>
+      <button id="tonyReset" class="secondary tony-only">Собрать и сбросить</button>
+      <button id="tonyRec" class="tony-only">Записать</button>
+      <a id="tonySave" class="secondary tony-only" hidden download>Скачать ролик</a>
+      <p class="hint tony-only">Щепоть одной рукой вращает, двумя — масштаб
+      и наклон. Развёл открытые ладони — разлёт на слои. Кулак собирает.
+      Щелчок меняет объект.</p>
 
       <div class="sep">Вид</div>
       <label class="row">

@@ -44,6 +44,10 @@
     "bounce": 0.45
   },
 
+  "tony": {
+    "model": "reactor"
+  },
+
   "guard": {
     "armSec": 15,
     "sensitivity": 12,

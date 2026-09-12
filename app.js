@@ -33,6 +33,7 @@ const cfg = {
   posture: { fps: 3, slouch: 0.12, tiltDeg: 8, holdSec: 8, cooldownSec: 600, voice: false },
   guard: { armSec: 15, sensitivity: 12, cooldownSec: 30, person: true, shots: true },
   wow: { gravity: 1400, bounce: 0.45 },
+  tony: { model: 'reactor' },
   edit: { preset: 'gym', seconds: 15, vertical: true, faceTrack: true, fx: [] },
   laid: {
     media: true,
@@ -87,6 +88,10 @@ async function loadConfig() {
   if (typeof cfg.edit?.seconds === 'number') opt.editSec.value = String(cfg.edit.seconds);
   if (cfg.edit && cfg.edit.vertical === false) opt.vertical.checked = false;
   if (cfg.edit && cfg.edit.faceTrack === false) opt.faceTrack.checked = false;
+  if (cfg.tony?.model && HOLOS[cfg.tony.model]) {
+    tony.model = cfg.tony.model;
+    holoSel.value = tony.model;
+  }
   if (typeof cfg.wow?.gravity === 'number') opt.gravity.value = String(cfg.wow.gravity);
   if (typeof cfg.wow?.bounce === 'number') opt.bounce.value = String(cfg.wow.bounce);
   for (const key of cfg.edit?.fx ?? []) {
@@ -130,6 +135,9 @@ const opt = {
   gravity:  document.getElementById('optGravity'),
   bounce:   document.getElementById('optBounce'),
   snapShape: document.getElementById('optSnapShape'),
+  hud:      document.getElementById('optHud'),
+  telemetry: document.getElementById('optTelemetry'),
+  spin:     document.getElementById('optSpin'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -150,6 +158,10 @@ const editMusicEl    = document.getElementById('editMusic');
 const shapeCountEl   = document.getElementById('shapeCount');
 const wowRecBtn      = document.getElementById('wowRec');
 const wowSaveEl      = document.getElementById('wowSave');
+const holoSel        = document.getElementById('holoSel');
+const holoScaleEl    = document.getElementById('holoScale');
+const tonyRecBtn     = document.getElementById('tonyRec');
+const tonySaveEl     = document.getElementById('tonySave');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -2230,7 +2242,9 @@ function stopEditRec() {
   edit.recorder = null;
   edit.stopAt = 0;
   musicEl?.pause();
-  if (edit.recBtn) edit.recBtn.textContent = edit.recBtn === wowRecBtn ? 'Записать' : 'Записать эдит';
+  if (edit.recBtn) {
+    edit.recBtn.textContent = edit.recBtn === editRecBtn ? 'Записать эдит' : 'Записать';
+  }
   counterEl.classList.remove('rec');
 }
 
@@ -2241,7 +2255,8 @@ function finishEditRec() {
   edit.url = URL.createObjectURL(blob);
   const link = edit.recLink || editSaveEl;
   link.href = edit.url;
-  link.download = `${link === wowSaveEl ? 'wow' : 'edit-' + edit.preset}-${Date.now()}.webm`;
+  const tag = link === wowSaveEl ? 'wow' : link === tonySaveEl ? 'tony' : `edit-${edit.preset}`;
+  link.download = `${tag}-${Date.now()}.webm`;
   link.hidden = false;
   link.textContent = `Скачать ролик (${(blob.size / 1048576).toFixed(1)} МБ)`;
   say('готово, ролик можно скачать');
@@ -2738,6 +2753,371 @@ function clearShapes() {
   wow.hint = 'чисто';
 }
 
+// --- режим Тони: голограмма в руках -----------------------------------------
+// Каркасные модели считаются на месте, никаких файлов. Каждая вершина знает
+// свой слой: по слоям объект и разлетается, когда разводишь ладони.
+function ring(r, z, segs, layer, tilt = 0) {
+  const verts = [], edges = [];
+  for (let i = 0; i < segs; i++) {
+    const a = (i / segs) * Math.PI * 2;
+    verts.push({ x: Math.cos(a) * r, y: Math.sin(a) * r * Math.cos(tilt), z: z + Math.sin(a) * r * Math.sin(tilt), layer });
+    edges.push([i, (i + 1) % segs]);
+  }
+  return { verts, edges };
+}
+
+function merge(parts) {
+  const verts = [], edges = [];
+  for (const p of parts) {
+    const off = verts.length;
+    verts.push(...p.verts);
+    for (const [a, b] of p.edges) edges.push([a + off, b + off]);
+  }
+  return { verts, edges, layers: Math.max(...verts.map(v => v.layer)) + 1 };
+}
+
+function buildReactor() {
+  const parts = [ring(1, 0, 40, 0), ring(0.72, 0.12, 32, 1), ring(0.44, 0.24, 24, 2),
+                  ring(0.18, 0.36, 16, 3)];
+  // спицы между внешним и вторым кольцом
+  const spokes = { verts: [], edges: [] };
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    spokes.verts.push({ x: Math.cos(a), y: Math.sin(a), z: 0, layer: 0 });
+    spokes.verts.push({ x: Math.cos(a) * 0.72, y: Math.sin(a) * 0.72, z: 0.12, layer: 1 });
+    spokes.edges.push([spokes.verts.length - 2, spokes.verts.length - 1]);
+  }
+  parts.push(spokes);
+  return { name: 'Арк-реактор', ...merge(parts) };
+}
+
+function buildGlobe() {
+  const parts = [];
+  for (let k = -3; k <= 3; k++) {
+    const lat = (k / 4) * (Math.PI / 2);
+    parts.push(ring(Math.cos(lat), Math.sin(lat), 28, Math.abs(k)));
+  }
+  const meridians = { verts: [], edges: [] };
+  for (let m = 0; m < 8; m++) {
+    const lon = (m / 8) * Math.PI * 2;
+    const start = meridians.verts.length;
+    for (let i = 0; i <= 16; i++) {
+      const t = (i / 16) * Math.PI - Math.PI / 2;
+      meridians.verts.push({ x: Math.cos(t) * Math.cos(lon), y: Math.sin(t),
+                             z: Math.cos(t) * Math.sin(lon), layer: 0 });
+      if (i) meridians.edges.push([start + i - 1, start + i]);
+    }
+  }
+  parts.push(meridians);
+  return { name: 'Глобус', ...merge(parts) };
+}
+
+function buildCore() {
+  const parts = [];
+  const sizes = [1, 0.68, 0.38];
+  sizes.forEach((sz, layer) => {
+    const v = [], e = [];
+    const c = [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+               [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]];
+    for (const [x, y, z] of c) v.push({ x: x * sz, y: y * sz, z: z * sz, layer });
+    const pairs = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+    e.push(...pairs);
+    parts.push({ verts: v, edges: e });
+  });
+  return { name: 'Ядро', ...merge(parts) };
+}
+
+const HOLOS = { reactor: buildReactor(), globe: buildGlobe(), core: buildCore() };
+
+const tony = {
+  model: 'reactor',
+  yaw: 0.4, pitch: -0.25, roll: 0,
+  vyaw: 0.25, vpitch: 0,
+  scale: 1, explode: 0,
+  pinch: null,          // рука, что тащит вращение
+  twoBase: 0,
+  openBase: 0,
+  lastAt: 0,
+  scan: 0,
+  hint: 'щепоть вращает',
+  nextAt: 0,
+};
+
+// поворот вокруг трёх осей и перспектива
+function project(v, cx, cy, unit) {
+  const { yaw, pitch, roll } = tony;
+  const cy1 = Math.cos(yaw), sy1 = Math.sin(yaw);
+  let x = v.x * cy1 + v.z * sy1;
+  let z = -v.x * sy1 + v.z * cy1;
+  let y = v.y;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const y2 = y * cp - z * sp;
+  z = y * sp + z * cp;
+  y = y2;
+  const cr = Math.cos(roll), sr = Math.sin(roll);
+  const x2 = x * cr - y * sr;
+  y = x * sr + y * cr;
+  x = x2;
+  // слои расходятся вдоль оси взгляда, поэтому объект «раскрывается»
+  z += (v.layer - 1) * tony.explode * 1.5;
+  const d = 4.2 + z;
+  const f = 3.4 / (d || 0.01);
+  return { x: cx + x * unit * f, y: cy + y * unit * f, depth: d };
+}
+
+function drawHolo(cx, cy, unit) {
+  const m = HOLOS[tony.model];
+  const pts = m.verts.map(v => project(v, cx, cy, unit));
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineWidth = 1.6;
+  for (const [a, b] of m.edges) {
+    const p = pts[a], q = pts[b];
+    const far = Math.max(p.depth, q.depth);
+    const alpha = Math.max(0.18, Math.min(1.1 - (far - 3.4) * 0.42, 1));
+    ctx.strokeStyle = `rgba(120,226,255,${alpha})`;
+    ctx.shadowColor = '#6fe3ff';
+    ctx.shadowBlur = 14 * alpha;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(q.x, q.y);
+    ctx.stroke();
+  }
+  // узлы поярче, так каркас читается
+  for (const p of pts) {
+    const a = Math.max(0.15, Math.min(1.1 - (p.depth - 3.4) * 0.42, 1));
+    ctx.fillStyle = `rgba(210,245,255,${a * 0.8})`;
+    ctx.fillRect(p.x - 1.4, p.y - 1.4, 2.8, 2.8);
+  }
+  ctx.restore();
+}
+
+// --- интерфейс как в фильме -------------------------------------------------
+function drawReticle(x, y, r, label, on) {
+  const t = performance.now() / 1000;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = on ? 'rgba(255,214,120,.95)' : 'rgba(120,226,255,.75)';
+  ctx.shadowColor = on ? '#ffd678' : '#6fe3ff';
+  ctx.shadowBlur = 16;
+  ctx.lineWidth = 2;
+
+  for (let k = 0; k < 3; k++) {
+    const rr = r * (0.6 + k * 0.22);
+    const from = t * (k % 2 ? -1.2 : 1.6) + k;
+    ctx.beginPath();
+    ctx.arc(x, y, rr, from, from + Math.PI * (0.5 + k * 0.15));
+    ctx.stroke();
+  }
+  // угловые скобки
+  const c = r * 1.15, len = r * 0.3;
+  ctx.lineWidth = 2.4;
+  for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+    ctx.beginPath();
+    ctx.moveTo(x + sx * c, y + sy * c - sy * len);
+    ctx.lineTo(x + sx * c, y + sy * c);
+    ctx.lineTo(x + sx * c - sx * len, y + sy * c);
+    ctx.stroke();
+  }
+  ctx.shadowBlur = 0;
+  ctx.font = '11px monospace';
+  ctx.fillStyle = on ? 'rgba(255,214,120,.95)' : 'rgba(160,235,255,.8)';
+  ctx.fillText(label, x + c + 8, y - c + 12);
+  ctx.restore();
+}
+
+function drawHud(W, H) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // сетка
+  ctx.strokeStyle = 'rgba(90,190,230,.10)';
+  ctx.lineWidth = 1;
+  const step = Math.round(W / 26);
+  ctx.beginPath();
+  for (let x = 0; x < W; x += step) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+  for (let y = 0; y < H; y += step) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+  ctx.stroke();
+
+  // рамка по углам
+  ctx.strokeStyle = 'rgba(120,226,255,.55)';
+  ctx.lineWidth = 2;
+  const m = Math.round(W * 0.03), L = Math.round(W * 0.06);
+  for (const [sx, sy, ox, oy] of [[1, 1, m, m], [-1, 1, W - m, m],
+                                  [1, -1, m, H - m], [-1, -1, W - m, H - m]]) {
+    ctx.beginPath();
+    ctx.moveTo(ox + sx * L, oy);
+    ctx.lineTo(ox, oy);
+    ctx.lineTo(ox, oy + sy * L);
+    ctx.stroke();
+  }
+
+  // сканирующая линия
+  tony.scan = (tony.scan + 0.004) % 1;
+  const sy = tony.scan * H;
+  const g = ctx.createLinearGradient(0, sy - 60, 0, sy + 60);
+  g.addColorStop(0, 'rgba(110,220,255,0)');
+  g.addColorStop(0.5, 'rgba(110,220,255,.22)');
+  g.addColorStop(1, 'rgba(110,220,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, sy - 60, W, 120);
+  ctx.restore();
+}
+
+function drawTelemetry(W, H, hands) {
+  const lines = [
+    `ОБЪЕКТ    ${HOLOS[tony.model].name}`,
+    `МАСШТАБ   ${tony.scale.toFixed(2)}`,
+    `РАЗЛЁТ    ${(tony.explode * 100).toFixed(0)}%`,
+    `КУРС      ${(tony.yaw * 57.3 % 360).toFixed(0)}°`,
+    `НАКЛОН    ${(tony.pitch * 57.3).toFixed(0)}°`,
+    `СЛОЁВ     ${HOLOS[tony.model].layers}`,
+    `РУК       ${hands.length}`,
+    `КАДРЫ     ${fpsSmoothed.toFixed(0)}`,
+  ];
+  ctx.save();
+  ctx.font = '12px monospace';
+  ctx.fillStyle = 'rgba(150,232,255,.85)';
+  ctx.shadowColor = '#6fe3ff';
+  ctx.shadowBlur = 8;
+  lines.forEach((l, i) => ctx.fillText(l, Math.round(W * 0.045), Math.round(H * 0.12) + i * 18));
+
+  // столбик уровней справа, просто для вида
+  const bx = Math.round(W * 0.93), by = Math.round(H * 0.2);
+  for (let i = 0; i < 14; i++) {
+    const v = (Math.sin(performance.now() / 380 + i) + 1) / 2;
+    ctx.fillStyle = `rgba(120,226,255,${0.25 + v * 0.6})`;
+    ctx.fillRect(bx, by + i * 14, 4 + v * 34, 7);
+  }
+  ctx.restore();
+}
+
+// --- цикл режима -----------------------------------------------------------
+const tonySnap = { armed: false, at: 0, gap: 0, wrist: null };
+
+function runTony(drawing) {
+  const now = performance.now();
+  const dt = Math.min(now - (tony.lastAt || now), 60);
+  tony.lastAt = now;
+
+  if (!landmarker || video.readyState < 2 || !syncCanvas()) return;
+
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  video.classList.toggle('hidden', !opt.video.checked);
+  video.style.transform = opt.mirror.checked
+    ? 'translate(-50%,-50%) scaleX(-1)'
+    : 'translate(-50%,-50%)';
+  // затемняем картинку: голограмма должна быть светлее мира
+  ctx.fillStyle = opt.video.checked ? 'rgba(4,10,18,.55)' : '#040a12';
+  ctx.fillRect(0, 0, W, H);
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    window.__last = landmarker.detectForVideo(video, now);
+  }
+  const hands = window.__last?.landmarks ?? [];
+  const px = lm => [(opt.mirror.checked ? 1 - lm.x : lm.x) * W, lm.y * H];
+
+  const pinches = [];
+  const opens = [];
+  let fist = false;
+  hands.forEach((lms, i) => {
+    const g = gestureOf(lms);
+    const size = d2(lms[0], lms[9]) || 1e-6;
+    const isPinch = d2(lms[4], lms[8]) / size < 0.55;
+    const [hx, hy] = px(lms[9]);
+    if (isPinch) pinches.push({ x: hx, y: hy, i });
+    if (g.pose === 'palm') opens.push({ x: hx, y: hy });
+    if (g.seqPose === 'fist') fist = true;
+    if (drawing) drawReticle(hx, hy, Math.max(W, H) * 0.055, isPinch ? 'ЗАХВАТ' : `РУКА ${i + 1}`, isPinch);
+    if (snapSignalFx(lms, now) && now > tony.nextAt) {
+      const keys = Object.keys(HOLOS);
+      tony.model = keys[(keys.indexOf(tony.model) + 1) % keys.length];
+      tony.nextAt = now + 600;
+      tony.hint = `объект: ${HOLOS[tony.model].name}`;
+      holoSel.value = tony.model;
+    }
+  });
+
+  if (pinches.length === 1) {
+    // одна щепоть — вращаем объект, как будто он в руке
+    const p = pinches[0];
+    if (tony.pinch) {
+      tony.vyaw = (p.x - tony.pinch.x) * 0.012;
+      tony.vpitch = (p.y - tony.pinch.y) * 0.012;
+    }
+    tony.pinch = p;
+    tony.twoBase = 0;
+    tony.hint = 'вращаю';
+  } else if (pinches.length >= 2) {
+    // две щепоти — масштаб по расстоянию и наклон по углу между руками
+    const [a, b] = pinches;
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    if (tony.twoBase) {
+      tony.scale = Math.min(Math.max(tony.scale * (dist / tony.twoBase), 0.35), 3.2);
+      tony.roll += ang - tony.twoAng;
+    }
+    tony.twoBase = dist;
+    tony.twoAng = ang;
+    tony.pinch = null;
+    tony.hint = 'масштаб и наклон';
+  } else {
+    tony.pinch = null;
+    tony.twoBase = 0;
+  }
+
+  // открытые ладони разводишь — объект раскрывается на слои
+  if (opens.length >= 2 && pinches.length === 0) {
+    const d = Math.hypot(opens[0].x - opens[1].x, opens[0].y - opens[1].y);
+    if (!tony.openBase) tony.openBase = d;
+    tony.explode = Math.min(Math.max((d - tony.openBase) / (W * 0.42), 0), 1);
+    if (tony.explode > 0.05) tony.hint = 'разлёт на слои';
+  } else {
+    tony.openBase = 0;
+    tony.explode *= 0.9;
+    if (tony.explode < 0.01) tony.explode = 0;
+  }
+
+  if (fist) {
+    tony.explode *= 0.75;
+    tony.scale += (1 - tony.scale) * 0.12;
+    tony.hint = 'собираю';
+  }
+
+  // инерция: объект продолжает крутиться после отпускания
+  if (!pinches.length && opt.spin.checked) tony.vyaw += (0.25 - tony.vyaw) * 0.02;
+  tony.yaw += tony.vyaw * dt / 1000 * 2.4;
+  tony.pitch = Math.min(Math.max(tony.pitch + tony.vpitch * dt / 1000 * 2.4, -1.2), 1.2);
+  if (!pinches.length) { tony.vpitch *= 0.94; }
+
+  if (drawing) {
+    if (opt.hud.checked) drawHud(W, H);
+    drawHolo(W / 2, H / 2, Math.min(W, H) * 0.22 * tony.scale);
+    if (opt.telemetry.checked) drawTelemetry(W, H, hands);
+  }
+
+  holoScaleEl.textContent = tony.scale.toFixed(2);
+  repsEl.textContent = HOLOS[tony.model].layers > 0 ? String(Math.round(tony.explode * 100)) : '0';
+  repsLeftEl.textContent = HOLOS[tony.model].name;
+  repsRightEl.textContent = `×${tony.scale.toFixed(2)}`;
+  phaseEl.textContent = tony.hint;
+  handsEl.textContent = `рук ${hands.length}`;
+  gestEl.textContent = `Тони · ${HOLOS[tony.model].name}`;
+  lastHandAt = now;
+}
+
+function resetTony() {
+  tony.scale = 1;
+  tony.explode = 0;
+  tony.roll = 0;
+  tony.pitch = -0.25;
+  tony.vpitch = 0;
+  tony.vyaw = 0.25;
+  tony.hint = 'собрано';
+}
+
 // --- главный цикл ----------------------------------------------------------
 let mode = 'gestures';
 let lastHandAt = 0;
@@ -2777,6 +3157,7 @@ function loop() {
   if (mode === 'guard') { runGuard(drawing); tickFps(); return; }
   if (mode === 'edit') { runEdit(drawing); tickFps(); return; }
   if (mode === 'wow') { runWow(drawing); tickFps(); return; }
+  if (mode === 'tony') { runTony(drawing); tickFps(); return; }
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -2853,6 +3234,7 @@ const MODE_NAMES = {
   gestures: 'режим жестов',
   edit: 'генератор эдитов',
   wow: 'вау-режим',
+  tony: 'режим Тони',
   laid: 'режим Дэвида Лэйда',
   posture: 'режим осанки',
   guard: 'режим охраны',
@@ -2861,7 +3243,7 @@ const MODE_NAMES = {
 async function setMode(next) {
   if (mode === next) return;
   mode = next;
-  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow']) {
+  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow', 'tony']) {
     document.body.classList.toggle(`mode-${name}`, mode === name);
   }
   counterEl.hidden = mode === 'gestures';
@@ -2878,7 +3260,13 @@ async function setMode(next) {
   resetSwipe();
   if (mode !== 'laid') stopMedia();
 
-  if (mode !== 'edit' && mode !== 'wow') stopEditRec();
+  if (mode !== 'edit' && mode !== 'wow' && mode !== 'tony') stopEditRec();
+
+  if (mode === 'tony') {
+    tony.lastAt = 0;
+    say('щепоть вращает, две щепоти масштабируют');
+    return;
+  }
 
   if (mode === 'wow') {
     wow.stroke = [];
@@ -2962,6 +3350,22 @@ for (const [key, f] of Object.entries(FX)) {
 
 editRecBtn.addEventListener('click', () => (edit.recorder ? stopEditRec() : startEditRec()));
 document.getElementById('wowClear').addEventListener('click', clearShapes);
+document.getElementById('tonyReset').addEventListener('click', resetTony);
+tonyRecBtn.addEventListener('click', () => (edit.recorder
+  ? stopEditRec()
+  : startEditRec(canvas, tonyRecBtn, tonySaveEl)));
+
+for (const [key, m] of Object.entries(HOLOS)) {
+  const o = document.createElement('option');
+  o.value = key;
+  o.textContent = m.name;
+  holoSel.appendChild(o);
+}
+holoSel.value = tony.model;
+holoSel.addEventListener('change', () => {
+  tony.model = holoSel.value;
+  tony.hint = `объект: ${HOLOS[tony.model].name}`;
+});
 wowRecBtn.addEventListener('click', () => (edit.recorder
   ? stopEditRec()
   : startEditRec(canvas, wowRecBtn, wowSaveEl)));

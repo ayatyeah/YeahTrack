@@ -116,6 +116,9 @@ DEFAULT_CONFIG = {
         'gravity': 1400,        # сила тяжести для фигур
         'bounce': 0.45,         # упругость отскока
     },
+    'tony': {
+        'model': 'reactor',     # reactor, globe, core
+    },
     'guard': {
         'armSec': 15,           # столько на то, чтобы уйти из кадра
         'sensitivity': 12,      # порог различия кадров, меньше — чувствительнее
