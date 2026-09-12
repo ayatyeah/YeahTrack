@@ -118,13 +118,20 @@
       <p class="hint">H — спрятать панель</p>
     </div>
 
-    <div class="media" id="media" hidden>
+    <div class="media media-left" id="mediaLeft" hidden>
       <div class="media-head">
         <span>Дэвид Лэйд</span>
-        <button id="mediaClose" title="Закрыть">×</button>
+        <button class="media-close" title="Закрыть">×</button>
       </div>
       <iframe id="mediaVideo" title="видео" allow="autoplay; encrypted-media"
               referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+    </div>
+
+    <div class="media media-right" id="mediaRight" hidden>
+      <div class="media-head">
+        <span>Плейлист</span>
+        <button class="media-close" title="Закрыть">×</button>
+      </div>
       <iframe id="mediaAudio" title="плейлист" allow="autoplay"></iframe>
     </div>
 

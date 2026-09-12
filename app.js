@@ -87,7 +87,8 @@ const repsEl     = document.getElementById('reps');
 const repsLeftEl = document.getElementById('repsLeft');
 const repsRightEl= document.getElementById('repsRight');
 const phaseEl    = document.getElementById('phase');
-const mediaEl    = document.getElementById('media');
+const mediaLeft  = document.getElementById('mediaLeft');
+const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
 const mediaAudio = document.getElementById('mediaAudio');
 
@@ -884,7 +885,9 @@ function soundcloudEmbed(url) {
 function startMedia() {
   if (mediaOn || DAEMON || !opt.media.checked || !cfg.laid.media) return;
   mediaOn = true;
-  mediaEl.hidden = false;
+  mediaLeft.hidden = false;
+  mediaRight.hidden = false;
+  panel.classList.add('hidden');           // панель настроек стоит ровно на плеере
   // src ставим только сейчас: иначе плеер грузится и играет до начала подхода
   mediaVideo.src = youtubeEmbed(cfg.laid.video);
   mediaAudio.src = soundcloudEmbed(cfg.laid.playlist);
@@ -893,7 +896,8 @@ function startMedia() {
 function stopMedia() {
   if (!mediaOn) return;
   mediaOn = false;
-  mediaEl.hidden = true;
+  mediaLeft.hidden = true;
+  mediaRight.hidden = true;
   mediaVideo.src = 'about:blank';                    // так плеер точно замолкает
   mediaAudio.src = 'about:blank';
 }
@@ -1032,7 +1036,11 @@ async function setMode(next) {
 
 modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
 document.getElementById('resetReps').addEventListener('click', resetReps);
-document.getElementById('mediaClose').addEventListener('click', stopMedia);
+document.querySelectorAll('.media-close')
+  .forEach(b => b.addEventListener('click', () => {
+    stopMedia();
+    panel.classList.remove('hidden');
+  }));
 opt.media.addEventListener('change', () => { if (!opt.media.checked) stopMedia(); });
 
 opt.mouse.addEventListener('change', () => {

@@ -137,10 +137,12 @@ body.mode-laid .gestures-only{display:none}
 }
 
 .media{
-  position:absolute;left:16px;bottom:16px;z-index:4;width:320px;
+  position:absolute;top:50%;transform:translateY(-50%);z-index:4;width:300px;
   background:var(--panel);border:1px solid var(--line);border-radius:14px;
   overflow:hidden;backdrop-filter:blur(14px);box-shadow:0 18px 44px rgba(0,0,0,.5);
 }
+.media-left{left:16px}
+.media-right{right:16px}
 .media-head{
   display:flex;align-items:center;justify-content:space-between;
   padding:7px 10px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;
@@ -152,5 +154,10 @@ body.mode-laid .gestures-only{display:none}
 }
 .media-head button:hover{color:var(--txt)}
 .media iframe{display:block;width:100%;border:0;background:#000}
-#mediaVideo{height:180px}
-#mediaAudio{height:120px;background:transparent}
+#mediaVideo{height:169px}
+#mediaAudio{height:166px;background:transparent}
+
+/* узкое окно: по бокам места нет, прижимаем к низу друг к другу */
+@media (max-width: 900px){
+  .media{top:auto;bottom:16px;transform:none;width:calc(50% - 24px)}
+}
