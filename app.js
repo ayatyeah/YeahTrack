@@ -31,6 +31,7 @@ const cfg = {
   idle: { afterSec: 5, fps: 4 },
   laid: {
     media: true,
+    mediaAfter: 3,            // включаем не с первого движения, а когда подход пошёл
     muteVideo: true,          // звук отдаём плейлисту, иначе всё смешается
     video: 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
     playlist: 'https://soundcloud.com/dewakii/sets/david-laid',
@@ -719,7 +720,6 @@ function countArm(side, pose) {
     if (angle < ANGLE_UP) {
       arm.phase = 'up';
       arm.peak = angle;
-      startMedia();                       // «начал поднимать» — включаем подход
     }
   } else {
     arm.peak = Math.min(arm.peak, angle);
@@ -733,6 +733,8 @@ function countArm(side, pose) {
         arm.reps++;
         curl.total++;
         onRep(side);
+        // одно случайное движение рукой — ещё не подход, ждём несколько чистых
+        if (curl.total >= Math.max(cfg.laid.mediaAfter, 1)) startMedia();
       }
       arm.cheat = false;
       arm.peak = 180;

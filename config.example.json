@@ -24,6 +24,7 @@
 
   "laid": {
     "media": true,
+    "mediaAfter": 3,
     "muteVideo": true,
     "video": "https://www.youtube.com/watch?v=M0HEVK6dlGI",
     "playlist": "https://soundcloud.com/dewakii/sets/david-laid"
