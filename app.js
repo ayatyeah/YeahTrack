@@ -636,22 +636,43 @@ function trackMouse(lms, g) {
 // Скелет до плеч даёт Pose Landmarker: плечо 11/12, локоть 13/14, запястье 15/16.
 const POSE = { LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16, LH: 23, RH: 24 };
 
-const ANGLE_DOWN = 150;   // градусов: рука выпрямлена
-const ANGLE_UP   = 62;    // согнута до пика
-const GRIP_TTL   = 1400;  // мс: столько помним, что кисть сжата на снаряде
-const ELBOW_DRIFT = 0.11; // доля кадра: дальше локоть уехал от корпуса — читинг
+const ANGLE_DOWN = 145;   // градусов: рука выпрямлена
+const ANGLE_UP   = 70;    // согнута до пика
+const DWELL_MS   = 140;   // столько угол должен продержаться за порогом
+const MIN_REP_MS = 350;   // быстрее — это рывок, а не повторение
+const MERGE_MS   = 700;   // два подъёма подряд — это одно повторение двумя руками
+const GRIP_TTL   = 2500;  // мс: столько помним, что кисть сжата на снаряде
+const ELBOW_DRIFT = 0.5;  // доли длины плеча, а не кадра: дальше — раскачка
+const NOTE_MS    = 1800;  // подсказку надо успеть прочитать
 
 let poseLandmarker = null;
 let poseLoading = null;
 let lastPose = null;
 let poseFrame = 0;
 
+const freshArm = () => ({
+  phase: 'down',   // down — рука выпрямлена, up — согнута
+  reps: 0,
+  cand: 0,         // когда угол впервые ушёл за порог: ждём, что он там останется
+  upAt: 0,         // начало подъёма, по нему меряем длительность повторения
+  cheat: false,
+  gripAt: 0,
+});
+
 const curl = {
-  left:  { phase: 'down', reps: 0, peak: 180, cheat: false, gripAt: 0 },
-  right: { phase: 'down', reps: 0, peak: 180, cheat: false, gripAt: 0 },
+  left: freshArm(),
+  right: freshArm(),
   total: 0,
+  lastRepAt: 0,
+  lastRepSide: null,
   note: '',
+  noteUntil: 0,
 };
+
+function say(text) {
+  curl.note = text;
+  curl.noteUntil = performance.now() + NOTE_MS;
+}
 
 function loadPose() {
   if (poseLandmarker) return Promise.resolve(poseLandmarker);
@@ -716,38 +737,55 @@ function countArm(side, pose) {
   const angle = angleAt(pose[S], pose[E], pose[W]);
   const now = performance.now();
 
-  // локоть должен стоять под плечом: иначе это раскачка корпусом
-  if (Math.abs(pose[E].x - pose[S].x) > ELBOW_DRIFT) arm.cheat = true;
+  // Локоть должен стоять под плечом. Меряем в длинах плеча, а не в долях
+  // кадра: иначе у стоящего близко к камере порог оказывался вдвое строже.
+  const upper = d2(pose[S], pose[E]) || 1e-6;
+  if (Math.abs(pose[E].x - pose[S].x) / upper > ELBOW_DRIFT) arm.cheat = true;
 
-  if (arm.phase === 'down') {
-    if (angle < ANGLE_UP) {
-      arm.phase = 'up';
-      arm.peak = angle;
-    }
-  } else {
-    arm.peak = Math.min(arm.peak, angle);
-    if (angle > ANGLE_DOWN) {
-      arm.phase = 'down';
-      const gripOk = !opt.grip.checked || now - arm.gripAt < GRIP_TTL;
-      const formOk = !opt.strict.checked || !arm.cheat;
-      if (!gripOk) curl.note = 'не вижу снаряда в кулаке';
-      else if (!formOk) curl.note = 'читинг: локоть гуляет';
-      else {
-        arm.reps++;
-        curl.total++;
-        onRep(side);
-        // одно случайное движение рукой — ещё не подход, ждём несколько чистых
-        if (curl.total >= Math.max(cfg.laid.mediaAfter, 1)) startMedia();
-      }
-      arm.cheat = false;
-      arm.peak = 180;
-    }
+  // Точки скелета дрожат, поэтому порог засчитывается не мгновенно:
+  // угол должен продержаться за ним DWELL_MS, иначе это шум.
+  const wantUp = arm.phase === 'down';
+  const crossed = wantUp ? angle < ANGLE_UP : angle > ANGLE_DOWN;
+  if (!crossed) {
+    arm.cand = 0;
+    return angle;
+  }
+  if (!arm.cand) arm.cand = now;
+  if (now - arm.cand < DWELL_MS) return angle;
+  arm.cand = 0;
+
+  if (wantUp) {
+    arm.phase = 'up';
+    arm.upAt = now;
+    return angle;
+  }
+
+  arm.phase = 'down';
+  const spent = now - arm.upAt;
+  const gripOk = !opt.grip.checked || now - arm.gripAt < GRIP_TTL;
+  const formOk = !opt.strict.checked || !arm.cheat;
+  arm.cheat = false;
+
+  if (spent < MIN_REP_MS) say('слишком быстро, это рывок');
+  else if (!gripOk) say('не вижу снаряда в кулаке');
+  else if (!formOk) say('читинг: локоть гуляет');
+  else {
+    arm.reps++;
+    // обе руки сгибаются вместе — это одно повторение, а не два
+    const together = curl.lastRepSide && curl.lastRepSide !== side
+                     && now - curl.lastRepAt < MERGE_MS;
+    if (!together) curl.total++;
+    curl.lastRepAt = now;
+    curl.lastRepSide = side;
+    onRep(side, together);
+    if (curl.total >= Math.max(cfg.laid.mediaAfter, 1)) startMedia();
   }
   return angle;
 }
 
-function onRep(side) {
-  curl.note = side === 'left' ? 'левая, зачтено' : 'правая, зачтено';
+function onRep(side, together) {
+  say(together ? 'обе руки, зачтено'
+               : (side === 'left' ? 'левая, зачтено' : 'правая, зачтено'));
   counterEl.classList.add('hit');
   setTimeout(() => counterEl.classList.remove('hit'), 130);
   if (curl.total % 5 === 0) osdSay(`${curl.total} подъёмов`);
@@ -763,11 +801,12 @@ function osdSay(text) {
 }
 
 function resetReps() {
-  for (const side of ['left', 'right']) {
-    Object.assign(curl[side], { phase: 'down', reps: 0, peak: 180, cheat: false, gripAt: 0 });
-  }
+  curl.left = freshArm();
+  curl.right = freshArm();
   curl.total = 0;
-  curl.note = 'счёт обнулён';
+  curl.lastRepAt = 0;
+  curl.lastRepSide = null;
+  say('счёт обнулён');
   stopMedia();
   paintCounter();
 }
@@ -843,7 +882,7 @@ function runLaid(drawing) {
   }
   const pose = lastPose?.landmarks?.[0] ?? null;
   if (!pose) {
-    curl.note = 'встань в кадр по пояс';
+    if (performance.now() > curl.noteUntil) curl.note = 'встань в кадр по пояс';
     paintCounter();
     handsEl.textContent = 'скелет: нет';
     return;
@@ -856,12 +895,11 @@ function runLaid(drawing) {
   }
 
   const angles = { left: countArm('left', pose), right: countArm('right', pose) };
-  if (!curl.note) {
+  if (performance.now() > curl.noteUntil) {
     const up = curl.left.phase === 'up' || curl.right.phase === 'up';
     curl.note = up ? 'сгибаешь' : 'опусти до конца';
   }
   paintCounter();
-  curl.note = '';
   if (drawing) drawArms(pose, angles);
 
   lastHandAt = performance.now();           // в этом режиме дремать нельзя
