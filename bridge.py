@@ -5,6 +5,7 @@
 без root и без ydotool. Оттуда же берутся мышь и колесо прокрутки.
 """
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -15,6 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / 'config.json'
+# История живёт рядом с настройками пользователя, а не в репозитории
+HISTORY_PATH = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) \
+    / 'yeahtrack' / 'workouts.json'
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8010
 
 # --- клавиши ---------------------------------------------------------------
@@ -92,6 +96,8 @@ DEFAULT_CONFIG = {
         'media': True,
         'mediaAfter': 0,            # 0 — по первому сгибанию, иначе столько повторений
         'window': False,            # True — отдельные окна браузера вместо панелей
+        'exercise': 'curl',         # curl, press, pushup, squat, raise
+        'restSec': 60,              # отдых между подходами, 0 — без таймера
         'muteVideo': True,          # звук отдаём плейлисту, иначе всё смешается
         'video': 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
         'playlist': 'https://soundcloud.com/dewakii/sets/david-laid',
@@ -275,6 +281,47 @@ class Injector:
                 self.session = None
 
 
+# --- история тренировок ----------------------------------------------------
+history_lock = threading.Lock()
+
+
+def read_history():
+    try:
+        data = json.loads(HISTORY_PATH.read_text())
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception:                                  # noqa: BLE001
+        return []                                      # битый файл не роняет мост
+
+
+def add_set(entry):
+    with history_lock:
+        data = read_history()
+        data.append(entry)
+        del data[:-2000]                               # больше двух тысяч подходов не храним
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = HISTORY_PATH.with_suffix('.tmp')
+        tmp.write_text(json.dumps(data, ensure_ascii=False))
+        tmp.replace(HISTORY_PATH)                      # запись целиком или никак
+        return len(data)
+
+
+def history_summary():
+    data = read_history()
+    today = time.strftime('%Y-%m-%d')
+    by_exercise = {}
+    today_reps = 0
+    for row in data:
+        if str(row.get('date')) == today:
+            reps = int(row.get('reps') or 0)
+            today_reps += reps
+            key = str(row.get('exercise') or '?')
+            by_exercise[key] = by_exercise.get(key, 0) + reps
+    return {'sets': len(data), 'todayReps': today_reps, 'todayBy': by_exercise,
+            'last': data[-12:]}
+
+
 injector = Injector()
 
 heartbeat = {'t': 0.0, 'fps': 0, 'hands': 0, 'camera': False, 'note': ''}
@@ -310,6 +357,8 @@ class Handler(SimpleHTTPRequestHandler):
                 'pages': {k: v[1] for k, v in pages.items()},
             }
             return self._json(200, st)
+        if path == '/history':
+            return self._json(200, history_summary())
         if path == '/config':
             return self._json(200, {'config': config, 'error': config_error})
         return super().do_GET()
@@ -318,7 +367,7 @@ class Handler(SimpleHTTPRequestHandler):
         path = self.path.split('?')[0]
         try:
             data = self._body() if path in ('/action', '/pointer', '/heartbeat',
-                                            '/osd') else {}
+                                            '/osd', '/workout') else {}
         except Exception as e:                         # noqa: BLE001
             return self._json(400, {'ok': False, 'reason': str(e)})
 
@@ -334,6 +383,24 @@ class Handler(SimpleHTTPRequestHandler):
                              camera=bool(data.get('camera')),
                              note=str(data.get('note') or '')[:200])
             return self._json(200, {'ok': True})
+
+        if path == '/workout':
+            reps = int(data.get('reps') or 0)
+            if reps <= 0:
+                return self._json(400, {'ok': False, 'reason': 'пустой подход'})
+            entry = {
+                'date': time.strftime('%Y-%m-%d'),
+                'time': time.strftime('%H:%M'),
+                'exercise': str(data.get('exercise') or 'curl')[:32],
+                'reps': reps,
+                'left': int(data.get('left') or 0),
+                'right': int(data.get('right') or 0),
+                'sec': int(data.get('sec') or 0),
+            }
+            total = add_set(entry)
+            print(f'✓ подход: {entry["exercise"]} × {reps}  (всего записей {total})',
+                  flush=True)
+            return self._json(200, {'ok': True, 'saved': entry})
 
         if path == '/osd':
             text = str(data.get('text') or '')[:120]

@@ -102,7 +102,7 @@ button.secondary{
 }
 button.secondary:hover{border-color:rgba(92,225,230,.5);color:var(--accent)}
 
-.modes{display:flex;gap:6px;margin:0 0 12px}
+.modes{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}
 .mode{
   flex:1;margin:0;padding:7px 6px;border-radius:9px;font-size:12px;font-weight:600;
   background:transparent;color:var(--muted);border:1px solid var(--line);cursor:pointer;
@@ -162,3 +162,10 @@ body.mode-laid .gestures-only{display:none}
 @media (max-width: 1200px){
   .media{top:auto;bottom:16px;transform:none;width:calc(50% - 24px)}
 }
+
+.counter .rest{
+  margin-top:10px;padding-top:10px;border-top:1px solid var(--line);
+  font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums;
+}
+.counter.calib .reps{font-size:44px;color:var(--txt)}
+.row b{color:var(--txt);font-variant-numeric:tabular-nums}

@@ -33,6 +33,8 @@ const cfg = {
     media: true,
     mediaAfter: 0,            // 0 — по первому сгибанию, иначе столько зачтённых повторений
     window: false,            // true — отдельные окна браузера вместо панелей по краям
+    exercise: 'curl',         // какое упражнение выбрано при старте
+    restSec: 60,              // отдых между подходами, 0 — без таймера
     muteVideo: true,          // звук отдаём плейлисту, иначе всё смешается
     video: 'https://www.youtube.com/watch?v=M0HEVK6dlGI',
     playlist: 'https://soundcloud.com/dewakii/sets/david-laid',
@@ -62,6 +64,11 @@ async function loadConfig() {
   }
   if (opt.mouse) opt.mouse.checked = !!cfg.mouse.enabled;
   if (opt.windows) opt.windows.checked = !!cfg.laid.window;
+  if (cfg.laid.exercise && EXERCISES[cfg.laid.exercise]) {
+    exercise = cfg.laid.exercise;
+    exerciseSel.value = exercise;
+  }
+  if (typeof cfg.laid.restSec === 'number') opt.rest.value = String(cfg.laid.restSec);
   if (cfg.mode === 'laid') setMode('laid');
 }
 
@@ -83,6 +90,8 @@ const opt = {
   grip:     document.getElementById('optGrip'),
   media:    document.getElementById('optMedia'),
   windows:  document.getElementById('optWindows'),
+  voice:    document.getElementById('optVoice'),
+  rest:     document.getElementById('optRest'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -91,6 +100,9 @@ const repsEl     = document.getElementById('reps');
 const repsLeftEl = document.getElementById('repsLeft');
 const repsRightEl= document.getElementById('repsRight');
 const phaseEl    = document.getElementById('phase');
+const restEl     = document.getElementById('rest');
+const todayEl    = document.getElementById('todayTotal');
+const exerciseSel= document.getElementById('exerciseSel');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -632,34 +644,51 @@ function trackMouse(lms, g) {
   }
 }
 
-// --- режим Дэвида Лэйда: счёт подъёмов на бицепс ----------------------------
-// Скелет до плеч даёт Pose Landmarker: плечо 11/12, локоть 13/14, запястье 15/16.
+// --- режим Дэвида Лэйда: счёт повторений ------------------------------------
+// Скелет до плеч и ног даёт Pose Landmarker. Считаем угол в суставе по трём
+// точкам и ловим переход «рабочее положение → исходное».
 const POSE = { LS: 11, RS: 12, LE: 13, RE: 14, LW: 15, RW: 16, LH: 23, RH: 24 };
 
-const ANGLE_DOWN = 145;   // градусов: рука выпрямлена
-const ANGLE_UP   = 70;    // согнута до пика
+// work — угол в рабочей точке (согнуто), rest — в исходной (выпрямлено).
+// invert: у махов всё наоборот, там рабочее положение — это больший угол.
+const EXERCISES = {
+  curl:   { name: 'Подъём на бицепс', joints: { left: [11, 13, 15], right: [12, 14, 16] },
+            work: 70, rest: 145, form: true, grip: true },
+  press:  { name: 'Жим над головой',  joints: { left: [11, 13, 15], right: [12, 14, 16] },
+            work: 95, rest: 155, grip: true },
+  pushup: { name: 'Отжимания',        joints: { left: [11, 13, 15], right: [12, 14, 16] },
+            work: 100, rest: 155 },
+  squat:  { name: 'Приседания',       joints: { left: [23, 25, 27], right: [24, 26, 28] },
+            work: 100, rest: 160 },
+  raise:  { name: 'Махи в стороны',   joints: { left: [23, 11, 13], right: [24, 12, 14] },
+            work: 75, rest: 30, invert: true },
+};
+
 const DWELL_MS   = 140;   // столько угол должен продержаться за порогом
 const MIN_REP_MS = 350;   // быстрее — это рывок, а не повторение
-const MERGE_MS   = 700;   // два подъёма подряд — это одно повторение двумя руками
+const MERGE_MS   = 700;   // два подъёма подряд разными сторонами — одно повторение
 const GRIP_TTL   = 2500;  // мс: столько помним, что кисть сжата на снаряде
 // Это синус наклона плеча от вертикали, больше единицы он не бывает:
 // 0.62 — примерно 38 градусов, дальше локоть уже выносится вперёд.
 const ELBOW_DRIFT = 0.62;
 const CHEAT_FRAMES = 3;   // и не по одному шумному кадру, а подряд
 const MIN_LIMB   = 0.05;  // доля кадра: короче — скелет схлопнулся, угол мусорный
-const STUCK_MS   = 8000;  // столько висеть в «вверх» нельзя, это залипание
+const STUCK_MS   = 8000;  // столько висеть в рабочей фазе нельзя, это залипание
 const NOTE_MS    = 1800;  // подсказку надо успеть прочитать
+const SET_GAP_MS = 20000; // тишина дольше — подход закончился
+const CALIB_MS   = 2600;  // столько держим каждое положение при калибровке
 
 let poseLandmarker = null;
 let poseLoading = null;
 let lastPose = null;
 let poseFrame = 0;
+let exercise = 'curl';
 
 const freshArm = () => ({
-  phase: 'down',   // down — рука выпрямлена, up — согнута
+  phase: 'rest',   // rest — исходное положение, work — рабочее
   reps: 0,
   cand: 0,         // когда угол впервые ушёл за порог: ждём, что он там останется
-  upAt: 0,         // начало подъёма, по нему меряем длительность повторения
+  workAt: 0,       // начало повторения, по нему меряем длительность
   cheat: false,
   bad: 0,          // сколько кадров подряд локоть был не на месте
   gripAt: 0,
@@ -672,13 +701,36 @@ const curl = {
   total: 0,
   lastRepAt: 0,
   lastRepSide: null,
+  setStartAt: 0,
   note: '',
   noteUntil: 0,
 };
 
+// Калибровка живёт в браузере: у каждого своя камера и свой ракурс.
+let calib = {};
+try {
+  calib = JSON.parse(localStorage.getItem('yeahtrack.calib') || '{}');
+} catch { calib = {}; }
+
+function limits() {
+  const ex = EXERCISES[exercise];
+  const own = calib[exercise];
+  return own ? { work: own.work, rest: own.rest, invert: ex.invert }
+             : { work: ex.work, rest: ex.rest, invert: ex.invert };
+}
+
 function say(text) {
   curl.note = text;
   curl.noteUntil = performance.now() + NOTE_MS;
+}
+
+function speak(text) {
+  if (!opt.voice.checked || DAEMON || !window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(String(text));
+  u.lang = 'ru-RU';
+  u.rate = 1.1;
+  window.speechSynthesis.cancel();          // очередь не копим, счёт должен успевать
+  window.speechSynthesis.speak(u);
 }
 
 function loadPose() {
@@ -734,70 +786,73 @@ function markGrips(hands, pose) {
   }
 }
 
+// читаем угол в суставе, если кадр вообще заслуживает доверия
+function readAngle(side, pose) {
+  const [A, B, C] = EXERCISES[exercise].joints[side];
+  if (!visible(pose[A]) || !visible(pose[B]) || !visible(pose[C])) return null;
+  // Звено вышло из кадра или смотрит в объектив — точки схлопываются,
+  // и угол превращается в мусор. Такому кадру не верим вовсе.
+  if (d2(pose[A], pose[B]) < MIN_LIMB || d2(pose[B], pose[C]) < MIN_LIMB) return null;
+  return angleAt(pose[A], pose[B], pose[C]);
+}
+
 function countArm(side, pose) {
-  const [S, E, W] = side === 'left'
-    ? [POSE.LS, POSE.LE, POSE.LW]
-    : [POSE.RS, POSE.RE, POSE.RW];
+  const ex = EXERCISES[exercise];
   const arm = curl[side];
-  if (!visible(pose[S]) || !visible(pose[E]) || !visible(pose[W])) return null;
+  const angle = readAngle(side, pose);
+  if (angle === null) { arm.cand = 0; return null; }
 
   const now = performance.now();
-  const upper = d2(pose[S], pose[E]);
-  const fore = d2(pose[E], pose[W]);
-  // Рука вышла из кадра или смотрит в объектив — звенья схлопываются в точку,
-  // и угол превращается в мусор. Такому кадру не верим вовсе.
-  if (upper < MIN_LIMB || fore < MIN_LIMB) {
-    arm.cand = 0;
-    return null;
-  }
-
-  const angle = angleAt(pose[S], pose[E], pose[W]);
   arm.angle = angle;
+  if (calibration.stage) return angle;      // во время калибровки не считаем
 
-  // Залипнуть в «вверх» нельзя: если разгибание так и не увидели, сбрасываем,
-  // иначе счётчик молчит до конца тренировки.
-  if (arm.phase === 'up' && now - arm.upAt > STUCK_MS) {
-    arm.phase = 'down';
+  // Залипнуть в рабочей фазе нельзя: если возврата так и не увидели,
+  // сбрасываем, иначе счётчик молчит до конца тренировки.
+  if (arm.phase === 'work' && now - arm.workAt > STUCK_MS) {
+    arm.phase = 'rest';
     arm.cand = 0;
     arm.cheat = false;
-    say('потерял разгибание, начинаю заново');
+    say('потерял возврат, начинаю заново');
   }
 
-  // Локоть должен стоять под плечом. Меряем в длинах плеча, а не в долях
-  // кадра: иначе у стоящего близко к камере порог оказывался вдвое строже.
-  // одиночный выброс координат — это шум, а не раскачка: ждём несколько подряд
-  if (Math.abs(pose[E].x - pose[S].x) / upper > ELBOW_DRIFT) {
-    if (++arm.bad >= CHEAT_FRAMES) arm.cheat = true;
-  } else {
-    arm.bad = 0;
+  if (ex.form) {
+    const [A, B] = ex.joints[side];
+    const upper = d2(pose[A], pose[B]) || 1e-6;
+    // одиночный выброс координат — это шум, а не раскачка: ждём несколько подряд
+    if (Math.abs(pose[B].x - pose[A].x) / upper > ELBOW_DRIFT) {
+      if (++arm.bad >= CHEAT_FRAMES) arm.cheat = true;
+    } else {
+      arm.bad = 0;
+    }
   }
 
   // Точки скелета дрожат, поэтому порог засчитывается не мгновенно:
   // угол должен продержаться за ним DWELL_MS, иначе это шум.
-  const wantUp = arm.phase === 'down';
-  const crossed = wantUp ? angle < ANGLE_UP : angle > ANGLE_DOWN;
-  if (!crossed) {
-    arm.cand = 0;
-    return angle;
-  }
+  const lim = limits();
+  const wantWork = arm.phase === 'rest';
+  const crossed = wantWork
+    ? (lim.invert ? angle > lim.work : angle < lim.work)
+    : (lim.invert ? angle < lim.rest : angle > lim.rest);
+  if (!crossed) { arm.cand = 0; return angle; }
+
   if (!arm.cand) {
     arm.cand = now;
-    // порог 0 — включаем сразу, как рука пошла вверх, не дожидаясь зачёта
-    if (wantUp && cfg.laid.mediaAfter <= 0) startMedia();
+    // порог 0 — включаем сразу, как пошло движение, не дожидаясь зачёта
+    if (wantWork && cfg.laid.mediaAfter <= 0) startMedia();
   }
   if (now - arm.cand < DWELL_MS) return angle;
   arm.cand = 0;
 
-  if (wantUp) {
-    arm.phase = 'up';
-    arm.upAt = now;
+  if (wantWork) {
+    arm.phase = 'work';
+    arm.workAt = now;
     return angle;
   }
 
-  arm.phase = 'down';
-  const spent = now - arm.upAt;
-  const gripOk = !opt.grip.checked || now - arm.gripAt < GRIP_TTL;
-  const formOk = !opt.strict.checked || !arm.cheat;
+  arm.phase = 'rest';
+  const spent = now - arm.workAt;
+  const gripOk = !opt.grip.checked || !ex.grip || now - arm.gripAt < GRIP_TTL;
+  const formOk = !opt.strict.checked || !ex.form || !arm.cheat;
   arm.cheat = false;
   arm.bad = 0;
 
@@ -806,10 +861,11 @@ function countArm(side, pose) {
   else if (!formOk) say('читинг: локоть гуляет');
   else {
     arm.reps++;
-    // обе руки сгибаются вместе — это одно повторение, а не два
+    // обе стороны работают вместе — это одно повторение, а не два
     const together = curl.lastRepSide && curl.lastRepSide !== side
                      && now - curl.lastRepAt < MERGE_MS;
     if (!together) curl.total++;
+    if (!curl.setStartAt) curl.setStartAt = now;
     curl.lastRepAt = now;
     curl.lastRepSide = side;
     onRep(side, together);
@@ -818,7 +874,7 @@ function countArm(side, pose) {
   return angle;
 }
 
-// Показываем живые цифры: так сразу видно, до какого угла доходит рука
+// Показываем живые цифры: так сразу видно, до какого угла доходит движение
 // и что мешает засчитать повторение.
 function statusLine(angles) {
   const part = (label, side) => {
@@ -826,17 +882,18 @@ function statusLine(angles) {
     if (a == null) return `${label} не вижу`;
     const arm = curl[side];
     const flag = arm.cheat ? ' локоть!' : '';
-    return `${label} ${Math.round(a)}° ${arm.phase === 'up' ? 'вверх' : 'вниз'}${flag}`;
+    return `${label} ${Math.round(a)}° ${arm.phase === 'work' ? 'вверх' : 'вниз'}${flag}`;
   };
   return `${part('л', 'left')} · ${part('п', 'right')}`;
 }
 
 function onRep(side, together) {
-  say(together ? 'обе руки, зачтено'
+  say(together ? 'обе стороны, зачтено'
                : (side === 'left' ? 'левая, зачтено' : 'правая, зачтено'));
+  speak(curl.total);
   counterEl.classList.add('hit');
   setTimeout(() => counterEl.classList.remove('hit'), 130);
-  if (curl.total % 5 === 0) osdSay(`${curl.total} подъёмов`);
+  if (curl.total % 5 === 0) osdSay(`${curl.total} повторений`);
 }
 
 function osdSay(text) {
@@ -848,19 +905,136 @@ function osdSay(text) {
   }).catch(() => {});
 }
 
-function resetReps() {
+// --- подход, отдых, история ------------------------------------------------
+const rest = { until: 0, announced: false };
+
+function finishSet() {
+  const reps = curl.total;
+  if (!reps) return;
+  const sec = curl.setStartAt ? Math.round((curl.lastRepAt - curl.setStartAt) / 1000) : 0;
+  fetch('/workout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      exercise, reps, sec,
+      left: curl.left.reps, right: curl.right.reps,
+    }),
+  }).then(refreshToday).catch(() => {});
+
+  const pause = parseInt(opt.rest.value, 10) || 0;
+  if (pause) {
+    rest.until = performance.now() + pause * 1000;
+    rest.announced = false;
+  }
+  speak(`подход закончен, ${reps}`);
+  osdSay(`Подход: ${reps} повторений`);
+  resetReps(true);
+}
+
+function tickRest() {
+  if (!rest.until) { restEl.hidden = true; return; }
+  const left = Math.ceil((rest.until - performance.now()) / 1000);
+  if (left > 0) {
+    restEl.hidden = false;
+    restEl.textContent = `отдых ${left} с`;
+    return;
+  }
+  rest.until = 0;
+  restEl.hidden = true;
+  if (!rest.announced) {
+    rest.announced = true;
+    speak('поехали');
+    osdSay('Отдых закончен');
+  }
+}
+
+async function refreshToday() {
+  try {
+    const h = await (await fetch('/history', { cache: 'no-store' })).json();
+    const mine = h.todayBy?.[exercise];
+    todayEl.textContent = h.todayReps
+      ? `${h.todayReps}${mine ? ` (${mine} тут)` : ''}`
+      : '—';
+  } catch { todayEl.textContent = '—'; }
+}
+
+// --- калибровка ------------------------------------------------------------
+const calibration = { stage: null, until: 0, min: 180, max: 0 };
+
+function startCalibration() {
+  calibration.stage = 'rest';
+  calibration.until = performance.now() + CALIB_MS;
+  calibration.min = 180;
+  calibration.max = 0;
+  counterEl.classList.add('calib');
+  speak('выпрями до конца и держи');
+}
+
+function tickCalibration(angles) {
+  const now = performance.now();
+  const vals = [angles.left, angles.right].filter(a => a != null);
+  for (const a of vals) {
+    calibration.min = Math.min(calibration.min, a);
+    calibration.max = Math.max(calibration.max, a);
+  }
+  const left = Math.ceil((calibration.until - now) / 1000);
+
+  if (calibration.stage === 'rest') {
+    repsEl.textContent = String(Math.max(left, 0));
+    curl.note = vals.length ? 'выпрями до конца и держи' : 'встань в кадр';
+    if (now < calibration.until) return;
+    calibration.restAngle = vals.length ? calibration.max : null;
+    calibration.stage = 'work';
+    calibration.until = now + CALIB_MS;
+    calibration.min = 180;
+    calibration.max = 0;
+    speak('согни до упора и держи');
+    return;
+  }
+
+  repsEl.textContent = String(Math.max(left, 0));
+  curl.note = vals.length ? 'согни до упора и держи' : 'встань в кадр';
+  if (now < calibration.until) return;
+
+  const workAngle = vals.length ? calibration.min : null;
+  calibration.stage = null;
+  counterEl.classList.remove('calib');
+
+  if (calibration.restAngle == null || workAngle == null
+      || Math.abs(calibration.restAngle - workAngle) < 25) {
+    say('калибровка не удалась, амплитуда слишком мала');
+    speak('не получилось');
+    return;
+  }
+  const ex = EXERCISES[exercise];
+  const lo = Math.min(workAngle, calibration.restAngle);
+  const hi = Math.max(workAngle, calibration.restAngle);
+  const span = hi - lo;
+  // Пороги ставим с запасом внутрь диапазона: до самых краёв человек
+  // на каждом повторении не доходит.
+  const limitsNow = ex.invert
+    ? { work: hi - span * 0.3, rest: lo + span * 0.25 }
+    : { work: lo + span * 0.3, rest: hi - span * 0.25 };
+  calib[exercise] = { work: Math.round(limitsNow.work), rest: Math.round(limitsNow.rest) };
+  try { localStorage.setItem('yeahtrack.calib', JSON.stringify(calib)); } catch { /* приватный режим */ }
+  say(`готово: рабочий ${calib[exercise].work}°, исходный ${calib[exercise].rest}°`);
+  speak('готово');
+  resetReps(true);
+}
+
+function resetReps(keepNote) {
   curl.left = freshArm();
   curl.right = freshArm();
   curl.total = 0;
   curl.lastRepAt = 0;
   curl.lastRepSide = null;
-  say('счёт обнулён');
-  stopMedia();
+  curl.setStartAt = 0;
+  if (!keepNote) say('счёт обнулён');
   paintCounter();
 }
 
 function paintCounter() {
-  repsEl.textContent = String(curl.total);
+  if (!calibration.stage) repsEl.textContent = String(curl.total);
   repsLeftEl.textContent = String(curl.left.reps);
   repsRightEl.textContent = String(curl.right.reps);
   phaseEl.textContent = curl.note;
@@ -885,24 +1059,22 @@ function drawArms(pose, angles) {
   }
 
   for (const side of ['left', 'right']) {
-    const [S, E, W] = side === 'left'
-      ? [POSE.LS, POSE.LE, POSE.LW]
-      : [POSE.RS, POSE.RE, POSE.RW];
-    if (!visible(pose[S]) || !visible(pose[E]) || !visible(pose[W])) continue;
+    const [A, B, C] = EXERCISES[exercise].joints[side];
+    if (!visible(pose[A]) || !visible(pose[B]) || !visible(pose[C])) continue;
 
-    const up = curl[side].phase === 'up';
-    ctx.strokeStyle = up ? '#5ce1e6' : 'rgba(255,255,255,.82)';
-    ctx.shadowColor = up ? '#5ce1e6' : 'transparent';
-    ctx.shadowBlur = up ? lw * 2.4 : 0;
+    const work = curl[side].phase === 'work';
+    ctx.strokeStyle = work ? '#5ce1e6' : 'rgba(255,255,255,.82)';
+    ctx.shadowColor = work ? '#5ce1e6' : 'transparent';
+    ctx.shadowBlur = work ? lw * 2.4 : 0;
     ctx.lineWidth = lw * 1.15;
     ctx.beginPath();
-    ctx.moveTo(...px(pose[S]));
-    ctx.lineTo(...px(pose[E]));
-    ctx.lineTo(...px(pose[W]));
+    ctx.moveTo(...px(pose[A]));
+    ctx.lineTo(...px(pose[B]));
+    ctx.lineTo(...px(pose[C]));
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    for (const i of [S, E, W]) {
+    for (const i of [A, B, C]) {
       ctx.beginPath();
       ctx.arc(...px(pose[i]), lw * 0.8, 0, Math.PI * 2);
       ctx.fillStyle = '#fff';
@@ -911,7 +1083,7 @@ function drawArms(pose, angles) {
 
     const a = angles[side];
     if (a != null) {
-      const [ex, ey] = px(pose[E]);
+      const [ex, ey] = px(pose[B]);
       ctx.font = `600 ${13 * dpr}px system-ui, sans-serif`;
       ctx.textAlign = 'left';
       ctx.fillStyle = curl[side].cheat ? '#ff9d9d' : 'rgba(255,255,255,.9)';
@@ -930,27 +1102,36 @@ function runLaid(drawing) {
   }
   const pose = lastPose?.landmarks?.[0] ?? null;
   if (!pose) {
-    if (performance.now() > curl.noteUntil) curl.note = 'встань в кадр по пояс';
+    if (performance.now() > curl.noteUntil) curl.note = 'встань в кадр целиком';
     paintCounter();
     handsEl.textContent = 'скелет: нет';
     return;
   }
 
   // кисти нужны только для проверки хвата, поэтому смотрим их через кадр
-  if (opt.grip.checked && landmarker && poseFrame % 3 === 0) {
+  if (opt.grip.checked && EXERCISES[exercise].grip && landmarker && poseFrame % 3 === 0) {
     const hres = landmarker.detectForVideo(video, performance.now() + 0.5);
     markGrips(hres?.landmarks ?? [], pose);
   }
 
   const angles = { left: countArm('left', pose), right: countArm('right', pose) };
-  if (performance.now() > curl.noteUntil) curl.note = statusLine(angles);
-  paintCounter();
+
+  if (calibration.stage) {
+    tickCalibration(angles);
+    paintCounter();
+  } else {
+    // тишина после повторений — подход закончился, пора записать и отдохнуть
+    if (curl.total && performance.now() - curl.lastRepAt > SET_GAP_MS) finishSet();
+    if (performance.now() > curl.noteUntil) curl.note = statusLine(angles);
+    paintCounter();
+    tickRest();
+  }
   if (drawing) drawArms(pose, angles);
 
   lastHandAt = performance.now();           // в этом режиме дремать нельзя
   handsEl.textContent = `угол ${[angles.left, angles.right]
     .filter(a => a != null).map(a => Math.round(a) + '°').join(' / ') || '—'}`;
-  gestEl.textContent = `подъёмов: ${curl.total}`;
+  gestEl.textContent = `${EXERCISES[exercise].name}: ${curl.total}`;
 }
 
 // --- видео и музыка на время подхода ---------------------------------------
@@ -1149,9 +1330,10 @@ async function setMode(next) {
   resetSwipe();
   curl.note = 'гружу скелет…';
   paintCounter();
+  refreshToday();
   try {
     await loadPose();
-    curl.note = 'встань в кадр по пояс';
+    curl.note = 'встань в кадр целиком';
   } catch (e) {
     curl.note = `скелет не загрузился: ${e.message}`;
   }
@@ -1159,7 +1341,24 @@ async function setMode(next) {
 }
 
 modeBtns.forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
-document.getElementById('resetReps').addEventListener('click', resetReps);
+document.getElementById('resetReps').addEventListener('click', () => resetReps());
+document.getElementById('calibBtn').addEventListener('click', startCalibration);
+
+for (const [key, ex] of Object.entries(EXERCISES)) {
+  const o = document.createElement('option');
+  o.value = key;
+  o.textContent = ex.name;
+  exerciseSel.appendChild(o);
+}
+exerciseSel.value = exercise;
+exerciseSel.addEventListener('change', () => {
+  exercise = exerciseSel.value;
+  resetReps();
+  const own = calib[exercise];
+  say(own ? `${EXERCISES[exercise].name}: по твоей калибровке`
+          : `${EXERCISES[exercise].name}: пороги по умолчанию`);
+  refreshToday();
+});
 document.querySelectorAll('.media-close')
   .forEach(b => b.addEventListener('click', () => {
     stopMedia();

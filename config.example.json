@@ -26,6 +26,8 @@
     "media": true,
     "mediaAfter": 0,
     "window": false,
+    "exercise": "curl",
+    "restSec": 60,
     "muteVideo": true,
     "video": "https://www.youtube.com/watch?v=M0HEVK6dlGI",
     "playlist": "https://soundcloud.com/dewakii/sets/david-laid"

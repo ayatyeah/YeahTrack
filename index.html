@@ -26,13 +26,14 @@
         <span><b id="repsRight">0</b> правая</span>
       </div>
       <div class="phase" id="phase">встань в кадр по пояс</div>
+      <div class="rest" id="rest" hidden></div>
     </div>
 
     <div class="panel" id="panel">
       <h1>YeahTrack</h1>
       <div class="modes">
-        <button class="mode on" id="modeGestures" data-mode="gestures">Жесты</button>
-        <button class="mode" id="modeLaid" data-mode="laid">Дэвид Лэйд</button>
+        <button class="mode on" id="modeGestures" data-mode="gestures">Режим жестов</button>
+        <button class="mode" id="modeLaid" data-mode="laid">Режим Дэвида Лэйда</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -83,7 +84,24 @@
       <button id="compactBtn" class="secondary">Компактно поверх всех</button>
       <p class="hint">Закреплённое окно не уезжает со столом. Компактное не
       закрывает вид, иначе смены стола не видно.</p>
-      <div class="sep laid-only">Подъёмы на бицепс</div>
+      <div class="sep laid-only">Упражнение</div>
+      <div class="row laid-only">
+        <select id="exerciseSel"></select>
+      </div>
+      <button id="calibBtn" class="secondary laid-only">Калибровать под себя</button>
+      <p class="hint laid-only" id="calibNote">Камера видит руку под ракурсом,
+      и углы отличаются от настоящих. Калибровка запоминает твои крайние
+      положения.</p>
+
+      <div class="sep laid-only">Подход</div>
+      <label class="row laid-only">
+        <span>Считать вслух</span>
+        <input type="checkbox" id="optVoice" checked>
+      </label>
+      <label class="row laid-only">
+        <span>Отдых, сек</span>
+        <input type="range" id="optRest" min="0" max="180" step="15" value="60">
+      </label>
       <label class="row laid-only">
         <span>Только со снарядом</span>
         <input type="checkbox" id="optGrip">
@@ -100,6 +118,7 @@
         <span>Отдельными окнами</span>
         <input type="checkbox" id="optWindows">
       </label>
+      <div class="row laid-only"><span>Сегодня</span><b id="todayTotal">—</b></div>
       <button id="resetReps" class="secondary laid-only">Обнулить счёт</button>
 
       <div class="sep">Вид</div>
