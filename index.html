@@ -29,6 +29,58 @@
       <div class="rest" id="rest" hidden></div>
     </div>
 
+    <aside class="manager trainer-only" id="manager">
+      <div class="mg-head">
+        <div>
+          <h2>Мои жесты</h2>
+          <div class="mg-sub" id="mgCount">—</div>
+        </div>
+        <button id="mgNew" class="mg-primary">+ Новый жест</button>
+      </div>
+
+      <section class="mg-form" id="mgForm" hidden>
+        <div class="mg-form-title">Новый жест</div>
+        <div class="trainer">
+          <input id="gName" class="field" placeholder="Название, например «рок»" maxlength="40">
+          <select id="gKind">
+            <option value="pose">Поза — держишь форму руки</option>
+            <option value="motion">Движение — повторяешь жест</option>
+          </select>
+          <label class="row">
+            <span>Запись, сек</span>
+            <input type="range" id="gSec" min="10" max="300" step="10" value="30">
+            <b id="gSecVal">30</b>
+          </label>
+          <select id="gTaskType">
+            <option value="action">Действие системы</option>
+            <option value="keys">Сочетание клавиш</option>
+            <option value="url">Открыть сайт</option>
+            <option value="command">Запустить программу</option>
+          </select>
+          <select id="gAction"></select>
+          <input id="gTaskValue" class="field" placeholder="ctrl+alt+t" hidden>
+          <button id="gRec">Начать запись</button>
+        </div>
+      </section>
+
+      <div class="mg-bg">
+        <div>
+          <div class="mg-bg-title">Фон</div>
+          <div class="mg-sub" id="mgBgInfo">не записан</div>
+        </div>
+        <div class="mg-bg-actions">
+          <button id="gBg" class="mg-ghost">Записать</button>
+          <button id="mgBgClear" class="mg-ghost">Очистить</button>
+        </div>
+      </div>
+      <p class="mg-note">Фон — как ты двигаешься, когда ничего не показываешь.
+      С ним жесты реже срабатывают сами по себе.</p>
+
+      <input id="mgFilter" class="field mg-filter" placeholder="Поиск по названию">
+      <div id="mgBusy" class="mg-busy" hidden>Идёт запись — правка жестов на паузе</div>
+      <div id="mgList" class="mg-list"></div>
+    </aside>
+
     <div class="panel" id="panel">
       <h1>YeahTrack</h1>
       <div class="modes">
@@ -99,34 +151,8 @@
       <p class="hint gestures-only">Записывать и проверять свои жесты —
       в режиме «Тренер жестов».</p>
 
-      <div class="sep trainer-only">Мои жесты</div>
-      <div id="customList" class="trainer-only custom-list"></div>
-
-      <div class="sep trainer-only">Новый жест</div>
-      <div class="trainer-only trainer">
-        <input id="gName" class="field" placeholder="Название, например «рок»" maxlength="40">
-        <select id="gKind">
-          <option value="pose">Поза — держишь форму руки</option>
-          <option value="motion">Движение — повторяешь жест</option>
-        </select>
-        <label class="row">
-          <span>Запись, сек</span>
-          <input type="range" id="gSec" min="10" max="300" step="10" value="30">
-          <b id="gSecVal">30</b>
-        </label>
-        <select id="gTaskType">
-          <option value="action">Действие системы</option>
-          <option value="keys">Сочетание клавиш</option>
-          <option value="url">Открыть сайт</option>
-          <option value="command">Запустить программу</option>
-        </select>
-        <select id="gAction"></select>
-        <input id="gTaskValue" class="field" placeholder="ctrl+alt+t" hidden>
-        <button id="gRec">Записать жест</button>
-        <button id="gBg" class="secondary">Записать фон</button>
-        <p class="hint">Фон — это как ты обычно двигаешься, когда ничего
-        не показываешь. С ним свои жесты реже срабатывают сами по себе.</p>
-      </div>
+      <p class="hint trainer-only">Управление жестами — в панели слева.
+      Задачи в тренере не запускаются, можно спокойно проверять.</p>
 
       <div class="sep laid-only">Упражнение</div>
       <div class="row laid-only">

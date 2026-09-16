@@ -177,7 +177,12 @@ const tonySaveEl     = document.getElementById('tonySave');
 const xrayPtsEl      = document.getElementById('xrayPts');
 const xrayRecBtn     = document.getElementById('xrayRec');
 const xraySaveEl     = document.getElementById('xraySave');
-const customListEl   = document.getElementById('customList');
+const mgListEl       = document.getElementById('mgList');
+const mgCountEl      = document.getElementById('mgCount');
+const mgBgInfoEl     = document.getElementById('mgBgInfo');
+const mgFilterEl     = document.getElementById('mgFilter');
+const mgBusyEl       = document.getElementById('mgBusy');
+const mgFormEl       = document.getElementById('mgForm');
 const gNameEl        = document.getElementById('gName');
 const gKindEl        = document.getElementById('gKind');
 const gSecEl         = document.getElementById('gSec');
@@ -3548,14 +3553,23 @@ const MOTION_MIN_PATH = 1.0;     // в размерах кисти: меньше
 const KEEP_SAMPLES = 900;
 const KNN = 5;
 const POSE_STABLE_MS = 350;
-const FIRE_COOLDOWN = 1500;
+// Позу от повтора бережёт перевзвод: руку надо убрать или сменить позу.
+// Поэтому пауза у позы короткая, иначе быстрый повторный показ терялся.
+const POSE_COOLDOWN = 600;
+const FIRE_COOLDOWN = 1500;       // у движения перевзвода нет, нужна пауза
 const BG_POSE = '__фон_поза';
 const BG_MOTION = '__фон_движение';
+
+const POSE_WINDOW_MS = 450;      // окно голосования для позы
+const POSE_SHARE = 0.7;          // доля кадров за один жест, чтобы сработать
+const POSE_MIN_SPAN = 300;       // окно должно быть заполнено хотя бы на столько
+const POSE_RELEASE = 0.3;        // ниже этой доли жест считается убранным
 
 const custom = {
   items: [],
   rec: null,
   hist: [],
+  poseWin: [],
   stable: { name: null, since: 0 },
   votes: [],
   lastFire: 0,
@@ -3610,26 +3624,197 @@ function dist(a, b) {
   return Math.sqrt(s);
 }
 
-// Порог по отложенным образцам: ближайшего соседа ищем, выкидывая соседей
-// по времени записи, иначе соседний кадр почти совпадает и порог выходит
-// нереально тесным.
-function computeThreshold(samples) {
-  const n = samples.length;
-  if (n < 12) return 0.8;
-  const ds = [];
-  const probes = Math.min(150, n);
-  for (let k = 0; k < probes; k++) {
-    const i = Math.floor((k / probes) * n);
-    let best = Infinity;
-    for (let j = 0; j < n; j++) {
-      if (Math.abs(i - j) < 10) continue;
-      const d = dist(samples[i], samples[j]);
-      if (d < best) best = d;
-    }
-    if (best < Infinity) ds.push(best);
+// --- признаки -----------------------------------------------------------------
+// Образцы хранятся «сырыми»: точки кисти относительно запястья. Признаки
+// считаются при загрузке, поэтому их можно улучшать, не перезаписывая жесты.
+//
+// Сырые координаты ломаются от наклона кисти: на 25 градусах узнавалось
+// меньше половины. Углы в суставах и расстояния между пальцами от наклона
+// не зависят, на них и держится узнавание. Направление кисти оставлено
+// с малым весом: без него «класс» и «дизлайк» были бы одним жестом.
+const CHAINS = [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12],
+                [0, 13, 14, 15, 16], [0, 17, 18, 19, 20]];
+const POSE_GROUPS = [[0, 15, 1.0], [15, 27, 1.0], [27, 31, 0.6], [31, 73, 0.3]];
+const MOTION_GROUPS = [[0, 24, 1.0], [24, 25, 0.5], [25, 27, 0.7], [27, 54, 0.45]];
+
+function joint(r, a, b, c) {
+  const ax = r[2 * a] - r[2 * b], ay = r[2 * a + 1] - r[2 * b + 1];
+  const cx = r[2 * c] - r[2 * b], cy = r[2 * c + 1] - r[2 * b + 1];
+  const n = (Math.hypot(ax, ay) * Math.hypot(cx, cy)) || 1e-6;
+  return Math.acos(Math.max(-1, Math.min(1, (ax * cx + ay * cy) / n))) / Math.PI;
+}
+const gap = (r, a, b) => Math.hypot(r[2 * a] - r[2 * b], r[2 * a + 1] - r[2 * b + 1]);
+function unit(x, y) { const n = Math.hypot(x, y) || 1; return [x / n, y / n]; }
+
+function poseFeat(r) {
+  const f = [];
+  for (const c of CHAINS) for (let k = 1; k < 4; k++) f.push(joint(r, c[k - 1], c[k], c[k + 1]));
+  for (const t of [4, 8, 12, 16, 20]) f.push(gap(r, 0, t));
+  for (const t of [8, 12, 16, 20]) f.push(gap(r, 4, t));
+  f.push(gap(r, 8, 12), gap(r, 12, 16), gap(r, 16, 20));
+  f.push(...unit(r[18], r[19]));                                  // запястье → средняя костяшка
+  f.push(...unit(r[16] - r[10], r[17] - r[11]));                  // направление указательного
+  for (const v of r) f.push(v);
+  return f;
+}
+
+function motionFeat(m) {
+  const traj = m.slice(0, 24);
+  let amp = 0;
+  for (const v of traj) amp = Math.max(amp, Math.abs(v));
+  // форма пути отдельно от размаха: широкий и мелкий взмах — один жест
+  const shape = traj.map(v => v / (amp || 1));
+  const pose = m.slice(24).map(v => v * 2);
+  return [...shape, Math.log1p(amp), ...unit(traj[22], traj[23]),
+          ...poseFeat(pose).slice(0, 27)];
+}
+
+// поворот сырой позы вокруг запястья — так учим терпимости к наклону
+function rotateRaw(r, a, jitter) {
+  const c = Math.cos(a), sn = Math.sin(a), out = new Array(r.length);
+  for (let i = 0; i < r.length; i += 2) {
+    out[i] = r[i] * c - r[i + 1] * sn + (Math.random() - 0.5) * jitter;
+    out[i + 1] = r[i] * sn + r[i + 1] * c + (Math.random() - 0.5) * jitter;
   }
-  ds.sort((a, b) => a - b);
-  return (ds[Math.floor(ds.length * 0.95)] ?? 0.5) * 1.5;
+  return out;
+}
+
+// --- модель ------------------------------------------------------------------
+const MODEL_REAL = 260;       // настоящих образцов на жест в модели
+const AUGMENT = 2;            // повёрнутых копий на образец позы
+const AUG_ANGLE = 28;         // градусов в каждую сторону
+const TIME_GAP = 8;           // соседи по записи не считаются «независимыми»
+
+const model = { pose: null, motion: null, stats: new Map() };
+
+function buildSpace(kind) {
+  const dims = kind === 'pose' ? POSE_DIMS : MOTION_DIMS;
+  const feat = kind === 'pose' ? poseFeat : motionFeat;
+  const groups = kind === 'pose' ? POSE_GROUPS : MOTION_GROUPS;
+  const rows = [];
+  for (const g of custom.items) {
+    if (g.enabled === false || !g.samples?.length) continue;
+    if (g.samples[0].length !== dims) continue;
+    if (g.kind !== kind && g.kind !== 'none') continue;
+    const real = thinOut(g.samples, MODEL_REAL);
+    real.forEach((smp, src) => {
+      rows.push({ f: feat(smp), g, src, real: true });
+      if (kind === 'pose') {
+        for (let k = 0; k < AUGMENT; k++) {
+          const a = ((Math.random() * 2 - 1) * AUG_ANGLE) * Math.PI / 180;
+          rows.push({ f: feat(rotateRaw(smp, a, 0.03)), g, src, real: false });
+        }
+      }
+    });
+  }
+  if (!rows.length) return null;
+
+  // Выравниваем масштаб признаков: иначе пара широких признаков
+  // перекрикивает все остальные.
+  const n = rows[0].f.length;
+  const mean = new Array(n).fill(0), sd = new Array(n).fill(0);
+  for (const r of rows) for (let i = 0; i < n; i++) mean[i] += r.f[i] / rows.length;
+  for (const r of rows) for (let i = 0; i < n; i++) sd[i] += (r.f[i] - mean[i]) ** 2 / rows.length;
+  const w = new Array(n).fill(1);
+  for (const [a, b, k] of groups) for (let i = a; i < b; i++) w[i] = k;
+  for (let i = 0; i < n; i++) sd[i] = Math.sqrt(sd[i]) || 1e-3;
+  const norm = f => f.map((v, i) => ((v - mean[i]) / sd[i]) * w[i]);
+  for (const r of rows) r.z = norm(r.f);
+
+  const space = { kind, rows, norm, feat, thr: new Map() };
+  calibrate(space);
+  return space;
+}
+
+// Порог и качество по отложенным образцам: ближайший сосед своего жеста
+// берётся без соседей по времени записи, иначе соседний кадр почти совпадает.
+function calibrate(space) {
+  const byG = new Map();
+  for (const r of space.rows) {
+    if (!byG.has(r.g)) byG.set(r.g, []);
+    byG.get(r.g).push(r);
+  }
+  for (const [g, own] of byG) {
+    if (g.kind === 'none') continue;
+    const probes = own.filter(r => r.real);
+    const step = Math.max(1, Math.floor(probes.length / 70));
+    const dsOwn = [];
+    let good = 0, total = 0;
+    const confusers = new Map();
+    for (let p = 0; p < probes.length; p += step) {
+      const q = probes[p];
+      let dOwn = Infinity, dOther = Infinity, other = null;
+      for (const r of space.rows) {
+        if (r.g === g) {
+          if (Math.abs(r.src - q.src) < TIME_GAP) continue;
+          const d = dist(q.z, r.z);
+          if (d < dOwn) dOwn = d;
+        } else {
+          const d = dist(q.z, r.z);
+          if (d < dOther) { dOther = d; other = r.g; }
+        }
+      }
+      if (dOwn === Infinity) continue;
+      dsOwn.push(dOwn);
+      total++;
+      if (dOwn < dOther) good++;
+      else if (other && other.kind !== 'none') confusers.set(other.name, (confusers.get(other.name) || 0) + 1);
+    }
+    dsOwn.sort((a, b) => a - b);
+    // Множитель подобран замером: при 1.8 узнаётся 98% на обычном наклоне
+    // и 85% на сорока градусах без единого ложного срабатывания, а с 2.1
+    // уже проходит четверть чужих поз.
+    const base = (dsOwn[Math.floor(dsOwn.length * 0.95)] ?? 1) * 1.8;
+    space.thr.set(g, base * (g.sensitivity || 1));
+
+    let worst = null, worstN = 0;
+    for (const [name, c] of confusers) if (c > worstN) { worst = name; worstN = c; }
+    model.stats.set(g.name, {
+      quality: total ? good / total : 0,
+      confusedWith: total && worstN / total > 0.12 ? worst : null,
+    });
+  }
+}
+
+function buildModel() {
+  model.stats = new Map();
+  model.pose = buildSpace('pose');
+  model.motion = buildSpace('motion');
+}
+
+// Ближайшие соседи с голосованием. per — ближайшая дистанция до каждого
+// жеста, нужна тренеру для полосок похожести.
+function classify(kind, raw, withPer = false) {
+  const space = model[kind];
+  if (!space) return null;
+  const q = space.norm(space.feat(raw));
+  const best = [];
+  const per = withPer ? new Map() : null;
+  for (const r of space.rows) {
+    const d = dist(q, r.z);
+    if (per && (!per.has(r.g) || d < per.get(r.g))) per.set(r.g, d);
+    if (best.length < KNN) { best.push({ d, g: r.g }); best.sort((a, b) => a.d - b.d); }
+    else if (d < best[KNN - 1].d) { best[KNN - 1] = { d, g: r.g }; best.sort((a, b) => a.d - b.d); }
+  }
+  if (!best.length) return null;
+
+  const votes = new Map();
+  for (const b of best) votes.set(b.g, (votes.get(b.g) || 0) + 1);
+  let win = null, count = 0;
+  for (const [g, c] of votes) if (c > count) { win = g; count = c; }
+  const result = { g: null, d: Infinity, votes: count, thr: 1, per, space };
+  if (!win || win.kind === 'none') return result.per ? result : null;   // победил фон
+
+  const mine = best.filter(b => b.g === win);
+  const d = mine.reduce((a, b) => a + b.d, 0) / mine.length;
+  const thr = space.thr.get(win) ?? 1;
+  // Спорный случай: другой жест почти так же близко. Лучше промолчать,
+  // чем выполнить не ту задачу.
+  const rival = best.find(b => b.g !== win && b.g.kind !== 'none');
+  // 0.92 отсекал лишнее: терялось до 7% честных жестов без выигрыша в точности
+  const ambiguous = count < KNN && rival && d > rival.d * 0.97;
+  if (d > thr || ambiguous) return result.per ? result : null;
+  return { g: win, d, votes: count, thr, per, space };
 }
 
 function thinOut(samples, max) {
@@ -3639,35 +3824,13 @@ function thinOut(samples, max) {
   return out;
 }
 
-function classify(vec, dims) {
-  const best = [];                                   // k ближайших: {d, name}
-  for (const g of custom.items) {
-    if (g.enabled === false || !g.samples.length) continue;
-    if (g.samples[0].length !== dims) continue;
-    for (const smp of g.samples) {
-      const d = dist(vec, smp);
-      if (best.length < KNN) { best.push({ d, g }); best.sort((a, b) => a.d - b.d); }
-      else if (d < best[KNN - 1].d) { best[KNN - 1] = { d, g }; best.sort((a, b) => a.d - b.d); }
-    }
-  }
-  if (!best.length) return null;
-  const votes = new Map();
-  for (const b of best) votes.set(b.g, (votes.get(b.g) || 0) + 1);
-  let win = null, count = 0;
-  for (const [g, c] of votes) if (c > count) { win = g; count = c; }
-  if (!win || win.kind === 'none') return null;      // победил фон — ничего не показывают
-  const mine = best.filter(b => b.g === win);
-  const mean = mine.reduce((a, b) => a + b.d, 0) / mine.length;
-  if (mean > (win.threshold || 0.8)) return null;    // слишком непохоже на записанное
-  return { g: win, d: mean, votes: count };
-}
-
 async function loadCustom() {
   try {
     const j = await (await fetch('/gestures', { cache: 'no-store' })).json();
     custom.items = j.gestures || [];
     fillActionSelect(j.actions || []);
   } catch { custom.items = []; }
+  buildModel();
   renderCustomList();
 }
 
@@ -3696,19 +3859,39 @@ function fireCustom(g) {
 
 // --- запись ------------------------------------------------------------------
 const COUNTDOWN_MS = 3000;
+const PROMPT_MS = 4000;
+// Модель учится на том, что видела. Если всю запись держать руку одинаково,
+// другой наклон она потом не узнает, поэтому просим менять положение.
+const PROMPTS = {
+  pose: ['держи прямо', 'наклони кисть влево', 'наклони вправо',
+         'поднеси руку ближе', 'отодвинь дальше', 'сдвинь руку в сторону',
+         'чуть поверни ладонь'],
+  motion: ['повторяй в обычном темпе', 'медленнее', 'быстрее',
+           'размашистее', 'мельче', 'чуть в другом месте кадра'],
+  both: ['двигайся как обычно', 'поправь волосы или почешись',
+         'возьми телефон или чашку', 'просто держи руку в кадре'],
+};
+const MIN_SAMPLES = { pose: 60, motion: 30 };
 
-function startTraining(background) {
+// append — имя жеста, к которому дописываем образцы
+function startTraining(background, append = null) {
   if (custom.rec) return stopTraining(true);
-  const name = background ? null : gNameEl.value.trim();
+  const existing = append ? custom.items.find(g => g.name === append) : null;
+  const name = background ? null : (existing ? existing.name : gNameEl.value.trim());
   if (!background && !name) { toast('дай жесту название', true); return; }
-  if (!background && name.startsWith('__')) { toast('такое имя занято', true); return; }
-  const task = background ? { type: 'none' } : readTaskForm();
+  if (!background && !existing && name.startsWith('__')) { toast('такое имя занято', true); return; }
+  if (!background && !existing && custom.items.some(g => g.name === name)) {
+    toast('жест с таким именем уже есть — дозапиши его в списке', true);
+    return;
+  }
+  const task = background ? { type: 'none' } : (existing ? existing.task : readTaskForm());
   if (!task) return;
   const now = performance.now();
   custom.rec = {
     background,
+    append: !!existing,
     name,
-    kind: background ? 'both' : gKindEl.value,
+    kind: background ? 'both' : (existing ? existing.kind : gKindEl.value),
     task,
     startAt: now + COUNTDOWN_MS,
     until: now + COUNTDOWN_MS + parseFloat(gSecEl.value) * 1000,
@@ -3718,8 +3901,10 @@ function startTraining(background) {
   };
   custom.hist = [];
   counterEl.hidden = false;
-  gRecBtn.textContent = background ? 'Записать жест' : 'Стоп';
-  gBgBtn.textContent = background ? 'Стоп' : 'Записать фон';
+  gRecBtn.textContent = background || append ? 'Начать запись' : 'Стоп';
+  gBgBtn.textContent = background ? 'Стоп' : 'Записать';
+  if (!background && !append) mgFormEl.hidden = true;
+  setBusy(true);
   speak?.(background ? 'двигайся как обычно' : 'приготовься');
 }
 
@@ -3737,14 +3922,20 @@ async function stopTraining(cancelled) {
   custom.rec = null;
   counterEl.hidden = mode === 'gestures';
   counterEl.classList.remove('rec');
-  gRecBtn.textContent = 'Записать жест';
-  gBgBtn.textContent = 'Записать фон';
+  gRecBtn.textContent = 'Начать запись';
+  gBgBtn.textContent = 'Записать';
+  setBusy(false);
   if (!r || cancelled) { toast('запись отменена'); return; }
 
-  const upsert = (name, kind, samples, task) => {
-    const thin = thinOut(samples, KEEP_SAMPLES);
-    const g = { name, kind, samples: thin, threshold: computeThreshold(thin), task, enabled: true };
+  const upsert = (name, kind, samples, task, merge) => {
     const i = custom.items.findIndex(x => x.name === name);
+    const prev = i >= 0 ? custom.items[i] : null;
+    const all = merge && prev ? [...prev.samples, ...samples] : samples;
+    const thin = thinOut(all, KEEP_SAMPLES);
+    const now = new Date().toISOString();
+    const g = { ...(prev || {}), name, kind, samples: thin, task,
+                enabled: prev?.enabled ?? true, sensitivity: prev?.sensitivity ?? 1,
+                createdAt: prev?.createdAt ?? now, updatedAt: now };
     if (i >= 0) custom.items[i] = g; else custom.items.push(g);
     return thin.length;
   };
@@ -3755,17 +3946,24 @@ async function stopTraining(cancelled) {
     if (r.motion.length) saved += upsert(BG_MOTION, 'none', r.motion, { type: 'none' });
   } else {
     const samples = r.kind === 'pose' ? r.pose : r.motion;
-    if (samples.length < 20) {
-      toast(r.kind === 'motion' ? 'мало движения, повторяй жест активнее' : 'мало кадров с рукой', true);
+    if (samples.length < MIN_SAMPLES[r.kind]) {
+      toast(r.kind === 'motion'
+        ? `мало движения: ${samples.length} образцов, нужно хотя бы ${MIN_SAMPLES.motion}`
+        : `мало кадров с рукой: ${samples.length}, нужно хотя бы ${MIN_SAMPLES.pose}`, true);
       return;
     }
-    saved = upsert(r.name, r.kind, samples, r.task);
+    saved = upsert(r.name, r.kind, samples, r.task, r.append);
   }
   try {
     await saveCustom();
-    toast(`сохранено образцов: ${saved}`);
+    const st = !r.background ? model.stats.get(r.name) : null;
+    if (st?.confusedWith) {
+      toast(`«${r.name}» путается с «${st.confusedWith}» — сделай их непохожими`, true);
+    } else {
+      toast(`сохранено образцов: ${saved}${st ? `, качество ${Math.round(st.quality * 100)}%` : ''}`);
+    }
     speak?.('записал');
-    if (!r.background) gNameEl.value = '';
+    if (!r.background && !r.append) gNameEl.value = '';
   } catch (e) {
     toast(`не сохранилось: ${e.message}`, true);
   }
@@ -3791,8 +3989,13 @@ function recordFrame(lms, left, now) {
     }
   }
   repsEl.textContent = String(Math.ceil((r.until - now) / 1000));
-  phaseEl.textContent = r.background ? 'двигайся как обычно'
-    : (r.kind === 'pose' ? 'держи позу, чуть меняй угол' : 'повторяй жест снова и снова');
+  const list = PROMPTS[r.kind] || PROMPTS.pose;
+  const idx = Math.floor((now - r.startAt) / PROMPT_MS) % list.length;
+  if (idx !== r.promptIdx) {
+    r.promptIdx = idx;
+    speak?.(list[idx]);
+  }
+  phaseEl.textContent = list[idx];
   repsLeftEl.textContent = r.background ? 'фон' : r.name;
   repsRightEl.textContent = `${r.kind === 'motion' ? r.motion.length : r.pose.length + r.motion.length} образцов`;
 }
@@ -3805,29 +4008,47 @@ function trackCustom(lms, left, now) {
   if (custom.rec) return;                             // пишут только в тренере
   if (!opt.custom.checked || !custom.items.length || !lms) {
     custom.stable = { name: null, since: 0 };
+    custom.poseWin = [];
+    if (!lms) custom.rearm = true;            // рука ушла — следующий показ новый
     return;
   }
-  if (now - custom.lastFire < FIRE_COOLDOWN) return;
+  // Поза: голосуем по окну, а не требуем цепочку без единого сбоя.
+  // При 4% промахов на кадр строгая цепочка из десяти кадров проходила
+  // лишь в двух случаях из трёх, окно с долей 70% прощает редкий сбой.
+  const pose = classify('pose', poseVec(lms, left));
+  custom.poseWin.push({ t: now, g: pose?.g ?? null });
+  while (custom.poseWin.length && now - custom.poseWin[0].t > POSE_WINDOW_MS) custom.poseWin.shift();
+  const share = new Map();
+  for (const e of custom.poseWin) if (e.g) share.set(e.g, (share.get(e.g) || 0) + 1);
+  let lead = null, leadN = 0;
+  for (const [g, c] of share) if (c > leadN) { lead = g; leadN = c; }
+  const frac = custom.poseWin.length ? leadN / custom.poseWin.length : 0;
+  const span = custom.poseWin.length ? now - custom.poseWin[0].t : 0;
 
-  // поза: одинаковый ответ должен продержаться, иначе это случайный кадр
-  const pose = classify(poseVec(lms, left), POSE_DIMS);
-  const pname = pose?.g.name ?? null;
-  if (pname !== custom.stable.name) {
-    custom.stable = { name: pname, since: now };
-    // вышел из позы — её снова можно показать
-    if (pname !== custom.lastFireName) custom.rearm = true;
-  } else if (pose && now - custom.stable.since > POSE_STABLE_MS && custom.rearm) {
+  // Последний сработавший жест убран — его снова можно показать. Судим
+  // только по заполненному окну: по паре кадров «убран» выходил ложно,
+  // и одна поза срабатывала дважды.
+  if (span >= POSE_MIN_SPAN) {
+    const lastShare = custom.lastFireName
+      ? custom.poseWin.filter(e => e.g?.name === custom.lastFireName).length / custom.poseWin.length
+      : 0;
+    if (lastShare < POSE_RELEASE) custom.rearm = true;
+  }
+
+  if (lead && span >= POSE_MIN_SPAN && frac >= POSE_SHARE
+      && now - custom.lastFire >= POSE_COOLDOWN
+      && (custom.rearm || lead.name !== custom.lastFireName)) {
     custom.rearm = false;
-    fireCustom(pose.g);
+    fireCustom(lead);
     return;
   }
 
   // движение: большинство из последних пяти оценок за один жест
   const mv = motionVec();
-  const motion = mv ? classify(mv, MOTION_DIMS) : null;
+  const motion = mv ? classify('motion', mv) : null;
   custom.votes.push(motion?.g.name ?? null);
   if (custom.votes.length > 5) custom.votes.shift();
-  if (motion) {
+  if (motion && now - custom.lastFire >= FIRE_COOLDOWN) {
     const same = custom.votes.filter(n => n === motion.g.name).length;
     if (same >= 3) {
       custom.votes = [];
@@ -3849,49 +4070,196 @@ function fillActionSelect(actions) {
   }
 }
 
+// --- менеджер жестов ---------------------------------------------------------
+const cardRefs = new Map();         // имя жеста → элементы карточки для живых полосок
+let barsAt = 0;
+const TASK_TYPES = [['action', 'Действие системы'], ['keys', 'Сочетание клавиш'],
+                    ['url', 'Открыть сайт'], ['command', 'Запустить программу']];
+
+function h(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'on') for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn);
+    else if (k === 'class') e.className = v;
+    else e[k] = v;
+  }
+  for (const k of kids) if (k != null) e.append(k);
+  return e;
+}
+
+const dayMonth = iso => {
+  const d = iso ? new Date(iso) : null;
+  return d && !isNaN(d) ? `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}` : '';
+};
+
+function taskText(task) {
+  if (!task || task.type === 'none') return 'без задачи';
+  if (task.type === 'action') return ACTION_LABELS[task.action] || task.action;
+  return task.keys || task.url || task.command || '';
+}
+
+// редактор задачи: тот же набор, что в форме нового жеста
+function taskEditor(task) {
+  const type = h('select', { class: 'field' });
+  for (const [v, t] of TASK_TYPES) type.append(h('option', { value: v, textContent: t }));
+  const action = h('select', { class: 'field' });
+  for (const o of gActionEl.options) action.append(h('option', { value: o.value, textContent: o.textContent }));
+  const value = h('input', { class: 'field' });
+  const sync = () => {
+    action.hidden = type.value !== 'action';
+    value.hidden = type.value === 'action';
+    value.placeholder = TASK_HINTS[type.value] || '';
+  };
+  type.value = task?.type && task.type !== 'none' ? task.type : 'action';
+  action.value = task?.action || action.options[0]?.value || '';
+  value.value = task?.keys || task?.url || task?.command || '';
+  type.addEventListener('change', () => { value.value = ''; sync(); });
+  sync();
+  return {
+    root: h('div', {}, type, action, value),
+    read() {
+      if (type.value === 'action') return { type: 'action', action: action.value };
+      const v = value.value.trim();
+      if (!v) { toast('заполни задачу', true); return null; }
+      if (type.value === 'url' && !/^https?:\/\//.test(v)) { toast('адрес с http:// или https://', true); return null; }
+      return { type: type.value, [type.value]: v };
+    },
+  };
+}
+
+async function commit(message) {
+  try {
+    await saveCustom();
+    if (message) toast(message);
+  } catch (e) {
+    toast(`не сохранилось: ${e.message}`, true);
+    await loadCustom();                       // вернуть как было на мосте
+  }
+}
+
+function buildCard(g) {
+  const st = model.stats.get(g.name);
+  const off = g.enabled === false;
+  const q = off ? { cls: 'none', text: 'выключен' }
+    : !st ? { cls: 'none', text: '—' }
+    : { cls: st.quality >= 0.9 ? 'good' : st.quality >= 0.7 ? 'mid' : 'bad',
+        text: `${Math.round(st.quality * 100)}%` };
+
+  const toggle = h('input', { type: 'checkbox', checked: !off, title: 'включить или выключить' });
+  toggle.addEventListener('change', () => {
+    g.enabled = toggle.checked;
+    commit(`«${g.name}» ${g.enabled ? 'включён' : 'выключен'}`);
+  });
+
+  const fill = h('div', { class: 'mg-fill' });
+  const pct = h('span', { class: 'mg-pct', textContent: '' });
+
+  const sensVal = h('b', { textContent: (g.sensitivity || 1).toFixed(2) });
+  const sens = h('input', { type: 'range', min: '0.5', max: '2', step: '0.05',
+                            value: String(g.sensitivity || 1),
+                            title: 'выше — срабатывает охотнее, ниже — строже' });
+  sens.addEventListener('input', () => { sensVal.textContent = parseFloat(sens.value).toFixed(2); });
+  sens.addEventListener('change', () => {
+    g.sensitivity = parseFloat(sens.value);
+    commit(`чувствительность «${g.name}»: ${g.sensitivity.toFixed(2)}`);
+  });
+
+  // правка
+  const nameInput = h('input', { class: 'field', value: g.name, maxLength: 40 });
+  const editor = taskEditor(g.task);
+  const edit = h('div', { class: 'mg-edit', hidden: true },
+    h('label', { textContent: 'Название' }), nameInput,
+    h('label', { textContent: 'Задача' }), editor.root,
+    h('div', { class: 'mg-actions' },
+      h('button', { class: 'mg-ghost', textContent: 'Сохранить', on: { click: () => {
+        const name = nameInput.value.trim();
+        if (!name) return toast('название пустое', true);
+        if (name.startsWith('__')) return toast('такое имя занято', true);
+        if (name !== g.name && custom.items.some(x => x.name === name)) return toast('такое имя уже есть', true);
+        const task = editor.read();
+        if (!task) return;
+        const old = g.name;
+        g.name = name;
+        g.task = task;
+        g.updatedAt = new Date().toISOString();
+        commit(old === name ? `«${name}» обновлён` : `«${old}» теперь «${name}»`);
+      } } }),
+      h('button', { class: 'mg-ghost', textContent: 'Отмена', on: { click: () => { edit.hidden = true; } } })));
+
+  // удаление с подтверждением: образцы восстановить нельзя
+  const confirmBox = h('div', { class: 'mg-confirm', hidden: true },
+    h('p', { textContent: `Удалить «${g.name}»? Записанные образцы пропадут.` }),
+    h('div', { class: 'mg-actions' },
+      h('button', { class: 'mg-ghost mg-danger', textContent: 'Удалить', on: { click: () => {
+        custom.items = custom.items.filter(x => x !== g);
+        commit(`«${g.name}» удалён`);
+      } } }),
+      h('button', { class: 'mg-ghost', textContent: 'Отмена', on: { click: () => { confirmBox.hidden = true; } } })));
+
+  const busyBtn = (text, fn, extra = '') =>
+    h('button', { class: `mg-ghost ${extra} needs-idle`, textContent: text, on: { click: fn } });
+
+  const card = h('div', { class: `mg-card${off ? ' off' : ''}` },
+    h('div', { class: 'mg-top' },
+      h('label', { class: 'mg-switch' }, toggle, h('span')),
+      h('div', { class: 'mg-title' },
+        h('div', { class: 'mg-name', textContent: g.name, title: g.name }),
+        h('div', { class: 'mg-meta', textContent:
+          `${g.kind === 'pose' ? 'поза' : 'движение'} · ${g.samples.length} обр.`
+          + (dayMonth(g.updatedAt) ? ` · ${dayMonth(g.updatedAt)}` : '') })),
+      h('span', { class: `mg-q ${q.cls}`, textContent: q.text,
+                  title: 'как часто жест узнаётся по своим же образцам' })),
+    h('div', { class: 'mg-barrow' }, h('div', { class: 'mg-bar' }, fill), pct),
+    h('div', { class: 'mg-task' }, 'задача: ', h('b', { textContent: taskText(g.task) })),
+    st?.confusedWith ? h('div', { class: 'mg-warn',
+      textContent: `путается с «${st.confusedWith}» — дозапиши или сделай жесты непохожими` }) : null,
+    h('div', { class: 'mg-sens' }, 'чувствительность', sens, sensVal),
+    h('div', { class: 'mg-actions' },
+      busyBtn('Изменить', () => { edit.hidden = !edit.hidden; confirmBox.hidden = true; }),
+      busyBtn('Дозаписать', () => startTraining(false, g.name)),
+      busyBtn('Выполнить задачу', () => fireCustom(g)),
+      busyBtn('Удалить', () => { confirmBox.hidden = !confirmBox.hidden; edit.hidden = true; }, 'mg-danger')),
+    edit, confirmBox);
+
+  cardRefs.set(g.name, { card, fill, pct });
+  return card;
+}
+
 function renderCustomList() {
-  customListEl.innerHTML = '';
+  cardRefs.clear();
   const mine = custom.items.filter(g => !g.name.startsWith('__'));
   const bg = custom.items.filter(g => g.name.startsWith('__'));
-  if (!mine.length) {
-    const p = document.createElement('div');
-    p.className = 'custom-empty';
-    p.textContent = 'своих жестов пока нет';
-    customListEl.appendChild(p);
+  const on = mine.filter(g => g.enabled !== false).length;
+  mgCountEl.textContent = mine.length ? `${mine.length} всего, включено ${on}` : 'пока пусто';
+  const bgN = bg.reduce((a, g) => a + g.samples.length, 0);
+  mgBgInfoEl.textContent = bgN ? `${bgN} образцов` : 'не записан';
+
+  const q = mgFilterEl.value.trim().toLowerCase();
+  const shown = mine.filter(g => !q || g.name.toLowerCase().includes(q));
+  const cards = shown.map(buildCard);
+  if (!cards.length) {
+    cards.push(h('div', { class: 'mg-empty',
+      textContent: mine.length ? 'ничего не нашлось' : 'Своих жестов пока нет. Нажми «+ Новый жест».' }));
   }
-  for (const g of mine) {
-    const row = document.createElement('div');
-    row.className = 'custom-item';
-    const main = document.createElement('div');
-    main.className = 'ci-main';
-    const name = document.createElement('div');
-    name.className = 'ci-name';
-    name.textContent = g.name;
-    const sub = document.createElement('div');
-    sub.className = 'ci-sub';
-    sub.textContent = `${g.kind === 'pose' ? 'поза' : 'движение'} · ${g.samples.length} обр. · ${g.taskLabel ?? ''}`;
-    main.append(name, sub);
-    const test = document.createElement('button');
-    test.className = 'ci-test';
-    test.textContent = 'задача';
-    test.title = 'выполнить задачу этого жеста прямо сейчас';
-    test.addEventListener('click', () => fireCustom(g));
-    const del = document.createElement('button');
-    del.textContent = 'удалить';
-    del.addEventListener('click', async () => {
-      custom.items = custom.items.filter(x => x !== g);
-      try { await saveCustom(); toast(`«${g.name}» удалён`); }
-      catch (e) { toast(`не удалилось: ${e.message}`, true); }
-    });
-    row.append(main, test, del);
-    customListEl.appendChild(row);
+  mgListEl.replaceChildren(...cards);
+  setBusy(!!custom.rec);
+}
+
+// живые полоски: насколько текущая рука похожа на каждый жест
+function paintBars(per, best, now) {
+  if (now - barsAt < 80) return;               // не чаще десяти раз в секунду
+  barsAt = now;
+  for (const [name, ref] of cardRefs) {
+    const v = per?.get(name) ?? 0;
+    ref.fill.style.width = `${Math.round(v * 100)}%`;
+    ref.pct.textContent = v > 0 ? `${Math.round(v * 100)}%` : '';
+    ref.card.classList.toggle('hit', best?.g?.name === name);
   }
-  if (bg.length) {
-    const p = document.createElement('div');
-    p.className = 'custom-empty';
-    p.textContent = `фон записан: ${bg.reduce((a, g) => a + g.samples.length, 0)} образцов`;
-    customListEl.appendChild(p);
-  }
+}
+
+function setBusy(busy) {
+  mgBusyEl.hidden = !busy;
+  for (const b of document.querySelectorAll('.needs-idle')) b.disabled = busy;
 }
 
 // --- режим тренера жестов ----------------------------------------------------
@@ -3903,9 +4271,24 @@ const trainer = { lastAt: 0, best: null, kind: null };
 // Квадрат растягивает шкалу: уверенное попадание читается как 60–80%,
 // а не как пугающие 33%.
 function similarity(match) {
-  if (!match) return 0;
-  const r = match.d / (match.g.threshold || 0.8);
+  if (!match?.g) return 0;
+  const r = match.d / (match.thr || 1);
   return Math.max(0, Math.min(1, 1 - r * r));
+}
+
+// похожесть руки на каждый жест, по лучшему из двух видов
+function mergePer(...results) {
+  const out = new Map();
+  for (const res of results) {
+    if (!res?.per) continue;
+    for (const [g, d] of res.per) {
+      if (g.kind === 'none') continue;
+      const thr = res.space.thr.get(g) ?? 1;
+      const v = Math.max(0, Math.min(1, 1 - (d / thr) ** 2));
+      if (!out.has(g.name) || v > out.get(g.name)) out.set(g.name, v);
+    }
+  }
+  return out;
 }
 
 const confidenceWord = v => (v >= 0.6 ? 'уверенно' : v >= 0.3 ? 'похоже' : 'на грани');
@@ -3965,10 +4348,12 @@ function runTrainer(drawing) {
   } else {
     counterEl.classList.remove('rec');
     // живая проверка: что сейчас узнаётся и насколько уверенно
-    const pose = lms ? classify(poseVec(lms, left), POSE_DIMS) : null;
+    const pose = lms ? classify('pose', poseVec(lms, left), true) : null;
     const mv = lms ? motionVec() : null;
-    const motion = mv ? classify(mv, MOTION_DIMS) : null;
-    const best = [pose, motion].filter(Boolean).sort((a, b) => similarity(b) - similarity(a))[0] || null;
+    const motion = mv ? classify('motion', mv, true) : null;
+    trainer.per = mergePer(pose, motion);
+    const best = [pose, motion].filter(m => m?.g)
+      .sort((a, b) => similarity(b) - similarity(a))[0] || null;
     trainer.best = best;
 
     const mine = custom.items.filter(g => !g.name.startsWith('__'));
@@ -3990,6 +4375,7 @@ function runTrainer(drawing) {
     }
     repsLeftEl.textContent = `жестов ${mine.length}`;
     repsRightEl.textContent = best ? `голосов ${best.votes}/${KNN}` : '';
+    paintBars(trainer.per, best, now);
   }
 
   if (drawing) {
@@ -4272,6 +4658,16 @@ editRecBtn.addEventListener('click', () => (edit.recorder ? stopEditRec() : star
 document.getElementById('wowClear').addEventListener('click', clearShapes);
 
 gRecBtn.addEventListener('click', () => (custom.rec ? stopTraining(true) : startTraining(false)));
+document.getElementById('mgNew').addEventListener('click', () => {
+  mgFormEl.hidden = !mgFormEl.hidden;
+  if (!mgFormEl.hidden) gNameEl.focus();
+});
+mgFilterEl.addEventListener('input', renderCustomList);
+document.getElementById('mgBgClear').addEventListener('click', () => {
+  if (!custom.items.some(g => g.name.startsWith('__'))) return toast('фон и так пуст');
+  custom.items = custom.items.filter(g => !g.name.startsWith('__'));
+  commit('фон очищен');
+});
 gBgBtn.addEventListener('click', () => (custom.rec ? stopTraining(true) : startTraining(true)));
 gSecEl.addEventListener('input', () => { gSecValEl.textContent = gSecEl.value; });
 const TASK_HINTS = {

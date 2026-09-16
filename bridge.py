@@ -473,12 +473,26 @@ def clean_gestures(raw):
             clean_task = {'type': 'url', 'url': str(task['url'])[:500]}
         elif ttype == 'command' and str(task.get('command') or '').strip():
             clean_task = {'type': 'command', 'command': str(task['command'])[:1000]}
+        try:
+            sens = float(g.get('sensitivity') or 1)
+        except (TypeError, ValueError):
+            sens = 1.0
         out.append({
             'name': name, 'kind': kind, 'samples': samples,
-            'threshold': float(g.get('threshold') or 0),
             'task': clean_task,
             'enabled': g.get('enabled', True) is not False,
+            'sensitivity': min(max(sens, 0.5), 2.0),
+            'createdAt': str(g.get('createdAt') or '')[:40],
+            'updatedAt': str(g.get('updatedAt') or '')[:40],
         })
+    # два жеста с одним именем мост путал бы при срабатывании
+    seen, unique = set(), []
+    for g in out:
+        if g['name'] in seen:
+            continue
+        seen.add(g['name'])
+        unique.append(g)
+    out = unique
     return out
 
 
