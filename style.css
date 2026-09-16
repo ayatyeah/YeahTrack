@@ -203,3 +203,24 @@ body.mode-tony .gestures-only{display:none}
 
 body:not(.mode-xray) .xray-only{display:none}
 body.mode-xray .gestures-only{display:none}
+
+.field{
+  width:100%;margin:6px 0;padding:7px 9px;border-radius:9px;
+  background:#12141d;color:var(--txt);border:1px solid var(--line);font-size:13px;
+}
+.field:focus{outline:none;border-color:rgba(92,225,230,.5)}
+.trainer select{margin:6px 0}
+.custom-list{display:flex;flex-direction:column;gap:6px;margin:6px 0}
+.custom-item{
+  display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:9px;
+  border:1px solid var(--line);font-size:12px;
+}
+.custom-item .ci-main{flex:1;min-width:0}
+.custom-item .ci-name{color:var(--txt);font-weight:600}
+.custom-item .ci-sub{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.custom-item button{
+  width:auto;margin:0;padding:2px 8px;background:transparent;color:var(--muted);
+  border:1px solid var(--line);border-radius:7px;font-size:12px;font-weight:500;
+}
+.custom-item button:hover{color:#ff9d9d;border-color:rgba(255,120,120,.4)}
+.custom-empty{color:var(--muted);font-size:12px;padding:4px 0}

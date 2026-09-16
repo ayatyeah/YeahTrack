@@ -90,6 +90,38 @@
       <button id="compactBtn" class="secondary gestures-only">Компактно поверх всех</button>
       <p class="hint gestures-only">Закреплённое окно не уезжает со столом. Компактное не
       закрывает вид, иначе смены стола не видно.</p>
+      <div class="sep gestures-only">Мои жесты</div>
+      <label class="row gestures-only">
+        <span>Распознавать мои</span>
+        <input type="checkbox" id="optCustom" checked>
+      </label>
+      <div id="customList" class="gestures-only custom-list"></div>
+
+      <div class="gestures-only trainer">
+        <input id="gName" class="field" placeholder="Название, например «рок»" maxlength="40">
+        <select id="gKind">
+          <option value="pose">Поза — держишь форму руки</option>
+          <option value="motion">Движение — повторяешь жест</option>
+        </select>
+        <label class="row">
+          <span>Запись, сек</span>
+          <input type="range" id="gSec" min="10" max="300" step="10" value="30">
+          <b id="gSecVal">30</b>
+        </label>
+        <select id="gTaskType">
+          <option value="action">Действие системы</option>
+          <option value="keys">Сочетание клавиш</option>
+          <option value="url">Открыть сайт</option>
+          <option value="command">Запустить программу</option>
+        </select>
+        <select id="gAction"></select>
+        <input id="gTaskValue" class="field" placeholder="ctrl+alt+t" hidden>
+        <button id="gRec">Записать жест</button>
+        <button id="gBg" class="secondary">Записать фон</button>
+        <p class="hint">Фон — это как ты обычно двигаешься, когда ничего
+        не показываешь. С ним свои жесты реже срабатывают сами по себе.</p>
+      </div>
+
       <div class="sep laid-only">Упражнение</div>
       <div class="row laid-only">
         <select id="exerciseSel"></select>

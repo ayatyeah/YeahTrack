@@ -7,6 +7,7 @@
 import base64
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -22,6 +23,11 @@ DATA_DIR = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')) /
 HISTORY_PATH = DATA_DIR / 'workouts.json'
 GUARD_DIR = DATA_DIR / 'guard'
 MAX_SHOT = 6 * 1024 * 1024        # снимок больше шести мегабайт не принимаем
+GESTURES_PATH = DATA_DIR / 'gestures.json'
+MAX_GESTURES_BODY = 24 * 1024 * 1024
+MAX_GESTURES = 30
+MAX_SAMPLES = 900                  # образцов на жест
+MAX_DIMS = 128                     # длина одного образца
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8010
 
 # --- клавиши ---------------------------------------------------------------
@@ -291,6 +297,15 @@ class Injector:
             self.osd.show(LABELS[action])
         return ok, reason
 
+    def tap_keys(self, keysyms):
+        def tap(sess):
+            for k in keysyms:
+                sess.NotifyKeyboardKeysym(k, True)
+            time.sleep(0.04)
+            for k in reversed(keysyms):
+                sess.NotifyKeyboardKeysym(k, False)
+        return self._with_session(tap)
+
     def pointer(self, move=None, button=None, down=None, scroll=None, hscroll=None):
         def act(sess):
             if move:
@@ -384,6 +399,134 @@ def save_shot(data_url):
     return name
 
 
+# --- свои жесты -------------------------------------------------------------
+# Образцы и задачи живут на стороне моста: так их видит и фоновый трекер,
+# и страница. Команда задачи хранится только здесь, страница её не присылает
+# при срабатывании, а лишь называет жест.
+gestures_lock = threading.Lock()
+
+KEY_NAMES = {
+    'ctrl': 0xFFE3, 'control': 0xFFE3, 'alt': 0xFFE9, 'shift': 0xFFE1,
+    'super': 0xFFEB, 'win': 0xFFEB, 'meta': 0xFFEB,
+    'enter': 0xFF0D, 'return': 0xFF0D, 'tab': 0xFF09, 'space': 0x0020,
+    'esc': 0xFF1B, 'escape': 0xFF1B, 'backspace': 0xFF08, 'delete': 0xFFFF,
+    'left': 0xFF51, 'up': 0xFF52, 'right': 0xFF53, 'down': 0xFF54,
+    'home': 0xFF50, 'end': 0xFF57, 'pageup': 0xFF55, 'pagedown': 0xFF56,
+    'print': 0xFF61, 'insert': 0xFF63,
+    'volumeup': VOL_UP, 'volumedown': VOL_DOWN, 'mute': VOL_MUTE,
+    'play': PLAY, 'next': NEXT, 'prev': PREV,
+}
+
+
+def parse_keys(combo):
+    """«ctrl+alt+t» → список кейсимов, или None, если что-то непонятно."""
+    out = []
+    for part in str(combo).lower().replace(' ', '').split('+'):
+        if not part:
+            return None
+        if part in KEY_NAMES:
+            out.append(KEY_NAMES[part])
+        elif len(part) == 1 and part.isprintable():
+            out.append(ord(part))
+        elif part[0] == 'f' and part[1:].isdigit() and 1 <= int(part[1:]) <= 12:
+            out.append(0xFFBE + int(part[1:]) - 1)
+        else:
+            return None
+    return out or None
+
+
+def read_gestures():
+    try:
+        data = json.loads(GESTURES_PATH.read_text())
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception:                                  # noqa: BLE001
+        return []
+
+
+def clean_gestures(raw):
+    """Проверяет присланный набор жестов и отрезает всё лишнее."""
+    if not isinstance(raw, list):
+        raise ValueError('ожидался список жестов')
+    out = []
+    for g in raw[:MAX_GESTURES]:
+        if not isinstance(g, dict):
+            continue
+        name = str(g.get('name') or '').strip()[:40]
+        kind = g.get('kind')
+        if not name or kind not in ('pose', 'motion', 'none'):
+            continue
+        samples = []
+        for smp in (g.get('samples') or [])[:MAX_SAMPLES]:
+            if isinstance(smp, list) and 0 < len(smp) <= MAX_DIMS \
+                    and all(isinstance(v, (int, float)) for v in smp):
+                samples.append([round(float(v), 4) for v in smp])
+        task = g.get('task') or {}
+        ttype = task.get('type')
+        clean_task = {'type': 'none'}
+        if ttype == 'action' and task.get('action') in ACTIONS:
+            clean_task = {'type': 'action', 'action': task['action']}
+        elif ttype == 'keys' and parse_keys(task.get('keys')):
+            clean_task = {'type': 'keys', 'keys': str(task['keys'])[:60]}
+        elif ttype == 'url' and str(task.get('url', '')).startswith(('http://', 'https://')):
+            clean_task = {'type': 'url', 'url': str(task['url'])[:500]}
+        elif ttype == 'command' and str(task.get('command') or '').strip():
+            clean_task = {'type': 'command', 'command': str(task['command'])[:1000]}
+        out.append({
+            'name': name, 'kind': kind, 'samples': samples,
+            'threshold': float(g.get('threshold') or 0),
+            'task': clean_task,
+            'enabled': g.get('enabled', True) is not False,
+        })
+    return out
+
+
+def save_gestures(items):
+    with gestures_lock:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = GESTURES_PATH.with_suffix('.tmp')
+        tmp.write_text(json.dumps(items, ensure_ascii=False))
+        tmp.replace(GESTURES_PATH)
+
+
+def run_task(task):
+    ttype = task.get('type')
+    if ttype == 'action':
+        return injector.send(task['action'])
+    if ttype == 'keys':
+        keys = parse_keys(task.get('keys'))
+        if not keys:
+            return False, 'непонятное сочетание'
+        return injector.tap_keys(keys)
+    if ttype == 'url':
+        try:
+            subprocess.Popen(['xdg-open', task['url']], stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return True, None
+        except Exception as e:                         # noqa: BLE001
+            return False, str(e)
+    if ttype == 'command':
+        try:
+            # без оболочки: никаких подстановок и цепочек команд
+            subprocess.Popen(shlex.split(task['command']), stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return True, None
+        except Exception as e:                         # noqa: BLE001
+            return False, str(e)
+    return False, 'у жеста нет задачи'
+
+
+def describe_task(task):
+    t = task.get('type')
+    return {
+        'action': lambda: LABELS.get(task.get('action'), task.get('action')),
+        'keys': lambda: task.get('keys'),
+        'url': lambda: task.get('url'),
+        'command': lambda: task.get('command'),
+    }.get(t, lambda: 'без задачи')()
+
+
 injector = Injector()
 
 heartbeat = {'t': 0.0, 'fps': 0, 'hands': 0, 'camera': False, 'note': ''}
@@ -421,6 +564,11 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, st)
         if path == '/history':
             return self._json(200, history_summary())
+        if path == '/gestures':
+            items = read_gestures()
+            for g in items:
+                g['taskLabel'] = describe_task(g.get('task') or {})
+            return self._json(200, {'gestures': items, 'actions': sorted(ACTIONS)})
         if path == '/guard':
             with guard_lock:
                 return self._json(200, {'events': guard_events[-40:],
@@ -429,12 +577,37 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {'config': config, 'error': config_error})
         return super().do_GET()
 
+    def _trusted(self):
+        """Пускаем только свою страницу и локальные утилиты вроде curl.
+
+        Мост слушает только 127.0.0.1, но любой открытый в браузере сайт может
+        отправить запрос на localhost. Браузер при этом ставит заголовок Origin
+        с адресом того сайта, по нему и отсекаем. Тело — только JSON: форма
+        с другим типом не пройдёт, а JSON с чужого сайта браузер не отправит
+        без предварительного запроса, на который мы не отвечаем.
+        """
+        origin = self.headers.get('Origin')
+        if origin and origin not in (f'http://localhost:{PORT}', f'http://127.0.0.1:{PORT}'):
+            return False, 'чужой источник'
+        if int(self.headers.get('Content-Length') or 0) > 0:
+            ctype = (self.headers.get('Content-Type') or '').split(';')[0].strip()
+            if ctype != 'application/json':
+                return False, 'тело только в JSON'
+        return True, None
+
     def do_POST(self):
         path = self.path.split('?')[0]
+        ok, reason = self._trusted()
+        if not ok:
+            print(f'× отклонён запрос {path}: {reason}', flush=True)
+            return self._json(403, {'ok': False, 'reason': reason})
         try:
             if path == '/guard':
                 data = self._body(MAX_SHOT * 2)        # base64 раздувает примерно на треть
-            elif path in ('/action', '/pointer', '/heartbeat', '/osd', '/workout'):
+            elif path == '/gestures':
+                data = self._body(MAX_GESTURES_BODY)
+            elif path in ('/action', '/pointer', '/heartbeat', '/osd', '/workout',
+                          '/gesture-fire'):
                 data = self._body()
             else:
                 data = {}
@@ -453,6 +626,29 @@ class Handler(SimpleHTTPRequestHandler):
                              camera=bool(data.get('camera')),
                              note=str(data.get('note') or '')[:200])
             return self._json(200, {'ok': True})
+
+        if path == '/gestures':
+            try:
+                items = clean_gestures(data.get('gestures'))
+            except ValueError as e:
+                return self._json(400, {'ok': False, 'reason': str(e)})
+            save_gestures(items)
+            print(f'✓ жестов сохранено: {len(items)}', flush=True)
+            return self._json(200, {'ok': True, 'count': len(items)})
+
+        if path == '/gesture-fire':
+            name = str(data.get('name') or '')
+            match = next((g for g in read_gestures()
+                          if g.get('name') == name and g.get('enabled', True)), None)
+            if not match:
+                return self._json(404, {'ok': False, 'reason': 'нет такого жеста'})
+            task = match.get('task') or {}
+            ok, reason = run_task(task)
+            if ok:
+                injector.osd.show(f'{name}: {describe_task(task)}')
+            print(f'{"→" if ok else "×"} жест «{name}»: {describe_task(task)}'
+                  + ('' if ok else f'  ({reason})'), flush=True)
+            return self._json(200 if ok else 500, {'ok': ok, 'reason': reason})
 
         if path == '/workout':
             reps = int(data.get('reps') or 0)

@@ -149,6 +149,7 @@ const opt = {
   density:  document.getElementById('optDensity'),
   bones:    document.getElementById('optBones'),
   outline:  document.getElementById('optOutline'),
+  custom:   document.getElementById('optCustom'),
   strict:   document.getElementById('optStrict'),
 };
 
@@ -176,6 +177,16 @@ const tonySaveEl     = document.getElementById('tonySave');
 const xrayPtsEl      = document.getElementById('xrayPts');
 const xrayRecBtn     = document.getElementById('xrayRec');
 const xraySaveEl     = document.getElementById('xraySave');
+const customListEl   = document.getElementById('customList');
+const gNameEl        = document.getElementById('gName');
+const gKindEl        = document.getElementById('gKind');
+const gSecEl         = document.getElementById('gSec');
+const gSecValEl      = document.getElementById('gSecVal');
+const gTaskTypeEl    = document.getElementById('gTaskType');
+const gActionEl      = document.getElementById('gAction');
+const gTaskValueEl   = document.getElementById('gTaskValue');
+const gRecBtn        = document.getElementById('gRec');
+const gBgBtn         = document.getElementById('gBg');
 const mediaLeft  = document.getElementById('mediaLeft');
 const mediaRight = document.getElementById('mediaRight');
 const mediaVideo = document.getElementById('mediaVideo');
@@ -3525,6 +3536,358 @@ function runXray(drawing) {
   lastHandAt = now;
 }
 
+// --- свои жесты: запись и распознавание -----------------------------------
+// Поза — форма руки в кадре, движение — путь запястья за последние доли
+// секунды вместе с формой. Распознаём ближайшими соседями: для десятков
+// жестов по сотне образцов это быстро и не требует обучения сети.
+const POSE_DIMS = 42;
+const MOTION_DIMS = 24 + POSE_DIMS;
+const MOTION_WINDOW_MS = 700;
+const MOTION_POINTS = 12;
+const MOTION_MIN_PATH = 1.0;     // в размерах кисти: меньше — рука стоит
+const KEEP_SAMPLES = 900;
+const KNN = 5;
+const POSE_STABLE_MS = 350;
+const FIRE_COOLDOWN = 1500;
+const BG_POSE = '__фон_поза';
+const BG_MOTION = '__фон_движение';
+
+const custom = {
+  items: [],
+  rec: null,
+  hist: [],
+  stable: { name: null, since: 0 },
+  votes: [],
+  lastFire: 0,
+  lastFireName: null,
+  rearm: true,
+};
+
+// координаты от запястья в размерах кисти; левая рука отражается,
+// чтобы одна запись работала для обеих рук
+function poseVec(lms, left) {
+  const w = lms[0];
+  const size = d2(lms[0], lms[9]) || 1e-6;
+  const v = new Array(POSE_DIMS);
+  for (let i = 0; i < 21; i++) {
+    const x = (lms[i].x - w.x) / size;
+    v[2 * i] = left ? -x : x;
+    v[2 * i + 1] = (lms[i].y - w.y) / size;
+  }
+  return v;
+}
+
+function pushHist(lms, left, now) {
+  custom.hist.push({ t: now, x: lms[0].x, y: lms[0].y,
+                     size: d2(lms[0], lms[9]) || 1e-6, pose: poseVec(lms, left), left });
+  while (custom.hist.length && now - custom.hist[0].t > MOTION_WINDOW_MS) custom.hist.shift();
+}
+
+function motionVec() {
+  const h = custom.hist;
+  if (h.length < 8) return null;
+  const size = h.reduce((a, p) => a + p.size, 0) / h.length;
+  let path = 0;
+  for (let i = 1; i < h.length; i++) path += Math.hypot(h[i].x - h[i - 1].x, h[i].y - h[i - 1].y);
+  if (path / size < MOTION_MIN_PATH) return null;     // рука стоит — это не движение
+
+  const v = [];
+  const left = h[h.length - 1].left;
+  for (let k = 0; k < MOTION_POINTS; k++) {
+    const p = h[Math.round((k / (MOTION_POINTS - 1)) * (h.length - 1))];
+    const dx = (p.x - h[0].x) / size;
+    v.push(left ? -dx : dx, (p.y - h[0].y) / size);
+  }
+  const mean = new Array(POSE_DIMS).fill(0);
+  for (const p of h) for (let i = 0; i < POSE_DIMS; i++) mean[i] += p.pose[i] / h.length;
+  for (const x of mean) v.push(x * 0.5);             // форма важна, но путь важнее
+  return v;
+}
+
+function dist(a, b) {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; s += d * d; }
+  return Math.sqrt(s);
+}
+
+// Порог по отложенным образцам: ближайшего соседа ищем, выкидывая соседей
+// по времени записи, иначе соседний кадр почти совпадает и порог выходит
+// нереально тесным.
+function computeThreshold(samples) {
+  const n = samples.length;
+  if (n < 12) return 0.8;
+  const ds = [];
+  const probes = Math.min(150, n);
+  for (let k = 0; k < probes; k++) {
+    const i = Math.floor((k / probes) * n);
+    let best = Infinity;
+    for (let j = 0; j < n; j++) {
+      if (Math.abs(i - j) < 10) continue;
+      const d = dist(samples[i], samples[j]);
+      if (d < best) best = d;
+    }
+    if (best < Infinity) ds.push(best);
+  }
+  ds.sort((a, b) => a - b);
+  return (ds[Math.floor(ds.length * 0.95)] ?? 0.5) * 1.5;
+}
+
+function thinOut(samples, max) {
+  if (samples.length <= max) return samples;
+  const out = [];
+  for (let k = 0; k < max; k++) out.push(samples[Math.floor((k / max) * samples.length)]);
+  return out;
+}
+
+function classify(vec, dims) {
+  const best = [];                                   // k ближайших: {d, name}
+  for (const g of custom.items) {
+    if (g.enabled === false || !g.samples.length) continue;
+    if (g.samples[0].length !== dims) continue;
+    for (const smp of g.samples) {
+      const d = dist(vec, smp);
+      if (best.length < KNN) { best.push({ d, g }); best.sort((a, b) => a.d - b.d); }
+      else if (d < best[KNN - 1].d) { best[KNN - 1] = { d, g }; best.sort((a, b) => a.d - b.d); }
+    }
+  }
+  if (!best.length) return null;
+  const votes = new Map();
+  for (const b of best) votes.set(b.g, (votes.get(b.g) || 0) + 1);
+  let win = null, count = 0;
+  for (const [g, c] of votes) if (c > count) { win = g; count = c; }
+  if (!win || win.kind === 'none') return null;      // победил фон — ничего не показывают
+  const mine = best.filter(b => b.g === win);
+  const mean = mine.reduce((a, b) => a + b.d, 0) / mine.length;
+  if (mean > (win.threshold || 0.8)) return null;    // слишком непохоже на записанное
+  return { g: win, d: mean, votes: count };
+}
+
+async function loadCustom() {
+  try {
+    const j = await (await fetch('/gestures', { cache: 'no-store' })).json();
+    custom.items = j.gestures || [];
+    fillActionSelect(j.actions || []);
+  } catch { custom.items = []; }
+  renderCustomList();
+}
+
+async function saveCustom() {
+  const body = { gestures: custom.items.map(({ taskLabel, ...g }) => g) };
+  const r = await fetch('/gestures', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.json()).reason || r.status);
+  await loadCustom();                                 // подтянуть подписи задач с моста
+}
+
+function fireCustom(g) {
+  custom.lastFire = performance.now();
+  custom.lastFireName = g.name;
+  toast(`жест «${g.name}»`);
+  fetch('/gesture-fire', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: g.name }),
+  }).then(r => r.json()).then(j => { if (!j.ok) toast(j.reason || 'не вышло', true); })
+    .catch(() => toast('мост недоступен', true));
+}
+
+// --- запись ------------------------------------------------------------------
+const COUNTDOWN_MS = 3000;
+
+function startTraining(background) {
+  if (custom.rec) return stopTraining(true);
+  const name = background ? null : gNameEl.value.trim();
+  if (!background && !name) { toast('дай жесту название', true); return; }
+  if (!background && name.startsWith('__')) { toast('такое имя занято', true); return; }
+  const task = background ? { type: 'none' } : readTaskForm();
+  if (!task) return;
+  const now = performance.now();
+  custom.rec = {
+    background,
+    name,
+    kind: background ? 'both' : gKindEl.value,
+    task,
+    startAt: now + COUNTDOWN_MS,
+    until: now + COUNTDOWN_MS + parseFloat(gSecEl.value) * 1000,
+    pose: [],
+    motion: [],
+    tick: 0,
+  };
+  custom.hist = [];
+  counterEl.hidden = false;
+  gRecBtn.textContent = background ? 'Записать жест' : 'Стоп';
+  gBgBtn.textContent = background ? 'Стоп' : 'Записать фон';
+  speak?.(background ? 'двигайся как обычно' : 'приготовься');
+}
+
+function readTaskForm() {
+  const type = gTaskTypeEl.value;
+  if (type === 'action') return { type, action: gActionEl.value };
+  const value = gTaskValueEl.value.trim();
+  if (!value) { toast('заполни задачу', true); return null; }
+  if (type === 'url' && !/^https?:\/\//.test(value)) { toast('адрес с http:// или https://', true); return null; }
+  return { type, [type === 'keys' ? 'keys' : type]: value };
+}
+
+async function stopTraining(cancelled) {
+  const r = custom.rec;
+  custom.rec = null;
+  counterEl.hidden = mode === 'gestures';
+  gRecBtn.textContent = 'Записать жест';
+  gBgBtn.textContent = 'Записать фон';
+  if (!r || cancelled) { toast('запись отменена'); return; }
+
+  const upsert = (name, kind, samples, task) => {
+    const thin = thinOut(samples, KEEP_SAMPLES);
+    const g = { name, kind, samples: thin, threshold: computeThreshold(thin), task, enabled: true };
+    const i = custom.items.findIndex(x => x.name === name);
+    if (i >= 0) custom.items[i] = g; else custom.items.push(g);
+    return thin.length;
+  };
+
+  let saved = 0;
+  if (r.background) {
+    if (r.pose.length) saved += upsert(BG_POSE, 'none', r.pose, { type: 'none' });
+    if (r.motion.length) saved += upsert(BG_MOTION, 'none', r.motion, { type: 'none' });
+  } else {
+    const samples = r.kind === 'pose' ? r.pose : r.motion;
+    if (samples.length < 20) {
+      toast(r.kind === 'motion' ? 'мало движения, повторяй жест активнее' : 'мало кадров с рукой', true);
+      return;
+    }
+    saved = upsert(r.name, r.kind, samples, r.task);
+  }
+  try {
+    await saveCustom();
+    toast(`сохранено образцов: ${saved}`);
+    speak?.('записал');
+    if (!r.background) gNameEl.value = '';
+  } catch (e) {
+    toast(`не сохранилось: ${e.message}`, true);
+  }
+}
+
+function recordFrame(lms, left, now) {
+  const r = custom.rec;
+  if (now < r.startAt) {
+    repsEl.textContent = String(Math.ceil((r.startAt - now) / 1000));
+    phaseEl.textContent = r.background ? 'сейчас двигайся как обычно' : 'приготовься…';
+    repsLeftEl.textContent = r.background ? 'фон' : r.name;
+    repsRightEl.textContent = '';
+    return;
+  }
+  if (now >= r.until) { stopTraining(false); return; }
+
+  if (lms) {
+    if (r.kind === 'pose' || r.kind === 'both') r.pose.push(poseVec(lms, left));
+    // движение пишем через кадр: соседние окна почти одинаковы
+    if ((r.kind === 'motion' || r.kind === 'both') && (++r.tick % 2 === 0)) {
+      const mv = motionVec();
+      if (mv) r.motion.push(mv);
+    }
+  }
+  repsEl.textContent = String(Math.ceil((r.until - now) / 1000));
+  phaseEl.textContent = r.background ? 'двигайся как обычно'
+    : (r.kind === 'pose' ? 'держи позу, чуть меняй угол' : 'повторяй жест снова и снова');
+  repsLeftEl.textContent = r.background ? 'фон' : r.name;
+  repsRightEl.textContent = `${r.kind === 'motion' ? r.motion.length : r.pose.length + r.motion.length} образцов`;
+}
+
+// --- распознавание в режиме жестов -----------------------------------------
+function trackCustom(lms, left, now) {
+  if (lms) pushHist(lms, left, now);
+  else custom.hist = [];
+
+  if (custom.rec) { recordFrame(lms, left, now); return; }
+  if (!opt.custom.checked || !custom.items.length || !lms) {
+    custom.stable = { name: null, since: 0 };
+    return;
+  }
+  if (now - custom.lastFire < FIRE_COOLDOWN) return;
+
+  // поза: одинаковый ответ должен продержаться, иначе это случайный кадр
+  const pose = classify(poseVec(lms, left), POSE_DIMS);
+  const pname = pose?.g.name ?? null;
+  if (pname !== custom.stable.name) {
+    custom.stable = { name: pname, since: now };
+    // вышел из позы — её снова можно показать
+    if (pname !== custom.lastFireName) custom.rearm = true;
+  } else if (pose && now - custom.stable.since > POSE_STABLE_MS && custom.rearm) {
+    custom.rearm = false;
+    fireCustom(pose.g);
+    return;
+  }
+
+  // движение: большинство из последних пяти оценок за один жест
+  const mv = motionVec();
+  const motion = mv ? classify(mv, MOTION_DIMS) : null;
+  custom.votes.push(motion?.g.name ?? null);
+  if (custom.votes.length > 5) custom.votes.shift();
+  if (motion) {
+    const same = custom.votes.filter(n => n === motion.g.name).length;
+    if (same >= 3) {
+      custom.votes = [];
+      custom.hist = [];
+      fireCustom(motion.g);
+    }
+  }
+}
+
+// --- список и форма ----------------------------------------------------------
+function fillActionSelect(actions) {
+  if (gActionEl.options.length) return;
+  for (const a of actions) {
+    if (a === 'nothing') continue;
+    const o = document.createElement('option');
+    o.value = a;
+    o.textContent = ACTION_LABELS[a] || a;
+    gActionEl.appendChild(o);
+  }
+}
+
+function renderCustomList() {
+  customListEl.innerHTML = '';
+  const mine = custom.items.filter(g => !g.name.startsWith('__'));
+  const bg = custom.items.filter(g => g.name.startsWith('__'));
+  if (!mine.length) {
+    const p = document.createElement('div');
+    p.className = 'custom-empty';
+    p.textContent = 'своих жестов пока нет';
+    customListEl.appendChild(p);
+  }
+  for (const g of mine) {
+    const row = document.createElement('div');
+    row.className = 'custom-item';
+    const main = document.createElement('div');
+    main.className = 'ci-main';
+    const name = document.createElement('div');
+    name.className = 'ci-name';
+    name.textContent = g.name;
+    const sub = document.createElement('div');
+    sub.className = 'ci-sub';
+    sub.textContent = `${g.kind === 'pose' ? 'поза' : 'движение'} · ${g.samples.length} обр. · ${g.taskLabel ?? ''}`;
+    main.append(name, sub);
+    const del = document.createElement('button');
+    del.textContent = 'удалить';
+    del.addEventListener('click', async () => {
+      custom.items = custom.items.filter(x => x !== g);
+      try { await saveCustom(); toast(`«${g.name}» удалён`); }
+      catch (e) { toast(`не удалилось: ${e.message}`, true); }
+    });
+    row.append(main, del);
+    customListEl.appendChild(row);
+  }
+  if (bg.length) {
+    const p = document.createElement('div');
+    p.className = 'custom-empty';
+    p.textContent = `фон записан: ${bg.reduce((a, g) => a + g.samples.length, 0)} образцов`;
+    customListEl.appendChild(p);
+  }
+}
+
 // --- главный цикл ----------------------------------------------------------
 let mode = 'gestures';
 let lastHandAt = 0;
@@ -3593,10 +3956,18 @@ function loop() {
   });
   for (let i = hands.length; i < trails.length; i++) trails[i] = [];
   if (hands.length) lastHandAt = performance.now();
-  trackSwipe(swipeCandidate);
-  trackSequence(seqPose);
-  trackSnap(hands[0] || null);
-  trackMouse(hands[0] || null, primary);
+  const firstLeft = res?.handedness?.[0]?.[0]?.categoryName === 'Left';
+  trackCustom(hands[0] || null, firstLeft, performance.now());
+  // пока пишем свой жест, встроенные молчат: повторы иначе листали бы столы
+  if (!custom.rec) {
+    trackSwipe(swipeCandidate);
+    trackSequence(seqPose);
+    trackSnap(hands[0] || null);
+    trackMouse(hands[0] || null, primary);
+  } else {
+    resetSwipe();
+    mouseRelease();
+  }
 
   lastHands = hands.length;
   handsEl.textContent = `рук: ${hands.length}`;
@@ -3772,6 +4143,22 @@ for (const [key, f] of Object.entries(FX)) {
 
 editRecBtn.addEventListener('click', () => (edit.recorder ? stopEditRec() : startEditRec()));
 document.getElementById('wowClear').addEventListener('click', clearShapes);
+
+gRecBtn.addEventListener('click', () => (custom.rec ? stopTraining(true) : startTraining(false)));
+gBgBtn.addEventListener('click', () => (custom.rec ? stopTraining(true) : startTraining(true)));
+gSecEl.addEventListener('input', () => { gSecValEl.textContent = gSecEl.value; });
+const TASK_HINTS = {
+  keys: 'ctrl+alt+t',
+  url: 'https://youtube.com',
+  command: 'firefox',
+};
+gTaskTypeEl.addEventListener('change', () => {
+  const t = gTaskTypeEl.value;
+  gActionEl.hidden = t !== 'action';
+  gTaskValueEl.hidden = t === 'action';
+  gTaskValueEl.placeholder = TASK_HINTS[t] || '';
+  gTaskValueEl.value = '';
+});
 document.getElementById('tonyReset').addEventListener('click', resetTony);
 tonyRecBtn.addEventListener('click', () => (edit.recorder
   ? stopEditRec()
@@ -3888,6 +4275,7 @@ function startHeartbeat() {
 (async () => {
   checkBridge();
   await loadConfig();
+  loadCustom();
   lastHandAt = performance.now();
   if (DAEMON) startHeartbeat();          // хотим видеть даже неудачный старт
   try {
