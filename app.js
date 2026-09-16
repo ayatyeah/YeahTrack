@@ -3736,6 +3736,7 @@ async function stopTraining(cancelled) {
   const r = custom.rec;
   custom.rec = null;
   counterEl.hidden = mode === 'gestures';
+  counterEl.classList.remove('rec');
   gRecBtn.textContent = 'Записать жест';
   gBgBtn.textContent = 'Записать фон';
   if (!r || cancelled) { toast('запись отменена'); return; }
@@ -3801,7 +3802,7 @@ function trackCustom(lms, left, now) {
   if (lms) pushHist(lms, left, now);
   else custom.hist = [];
 
-  if (custom.rec) { recordFrame(lms, left, now); return; }
+  if (custom.rec) return;                             // пишут только в тренере
   if (!opt.custom.checked || !custom.items.length || !lms) {
     custom.stable = { name: null, since: 0 };
     return;
@@ -3870,6 +3871,11 @@ function renderCustomList() {
     sub.className = 'ci-sub';
     sub.textContent = `${g.kind === 'pose' ? 'поза' : 'движение'} · ${g.samples.length} обр. · ${g.taskLabel ?? ''}`;
     main.append(name, sub);
+    const test = document.createElement('button');
+    test.className = 'ci-test';
+    test.textContent = 'задача';
+    test.title = 'выполнить задачу этого жеста прямо сейчас';
+    test.addEventListener('click', () => fireCustom(g));
     const del = document.createElement('button');
     del.textContent = 'удалить';
     del.addEventListener('click', async () => {
@@ -3877,7 +3883,7 @@ function renderCustomList() {
       try { await saveCustom(); toast(`«${g.name}» удалён`); }
       catch (e) { toast(`не удалилось: ${e.message}`, true); }
     });
-    row.append(main, del);
+    row.append(main, test, del);
     customListEl.appendChild(row);
   }
   if (bg.length) {
@@ -3886,6 +3892,117 @@ function renderCustomList() {
     p.textContent = `фон записан: ${bg.reduce((a, g) => a + g.samples.length, 0)} образцов`;
     customListEl.appendChild(p);
   }
+}
+
+// --- режим тренера жестов ----------------------------------------------------
+// Здесь пишут свои жесты и проверяют, что видит распознавание. Задачи
+// в этом режиме не запускаются: можно спокойно крутить руку и смотреть.
+const trainer = { lastAt: 0, best: null, kind: null };
+
+// Порог щедрый, поэтому честный жест лежит примерно на половине порога.
+// Квадрат растягивает шкалу: уверенное попадание читается как 60–80%,
+// а не как пугающие 33%.
+function similarity(match) {
+  if (!match) return 0;
+  const r = match.d / (match.g.threshold || 0.8);
+  return Math.max(0, Math.min(1, 1 - r * r));
+}
+
+const confidenceWord = v => (v >= 0.6 ? 'уверенно' : v >= 0.3 ? 'похоже' : 'на грани');
+
+function drawRecProgress(W, H, now) {
+  const r = custom.rec;
+  if (!r) return;
+  const pad = Math.round(W * 0.04), barH = Math.max(Math.round(H * 0.012), 6);
+  const counting = now < r.startAt;
+  const total = r.until - r.startAt;
+  const done = counting ? 0 : Math.min((now - r.startAt) / total, 1);
+
+  ctx.save();
+  // красная рамка по краю кадра — видно издалека, что идёт запись
+  ctx.strokeStyle = counting ? 'rgba(255,214,120,.8)' : 'rgba(255,90,90,.9)';
+  ctx.lineWidth = Math.max(W / 180, 4);
+  ctx.strokeRect(ctx.lineWidth / 2, ctx.lineWidth / 2, W - ctx.lineWidth, H - ctx.lineWidth);
+
+  ctx.fillStyle = 'rgba(255,255,255,.15)';
+  ctx.fillRect(pad, H - pad - barH, W - pad * 2, barH);
+  ctx.fillStyle = counting ? '#ffd166' : '#ff6b6b';
+  ctx.fillRect(pad, H - pad - barH, (W - pad * 2) * done, barH);
+  ctx.restore();
+}
+
+function runTrainer(drawing) {
+  const now = performance.now();
+  trainer.lastAt = now;
+  if (!landmarker || video.readyState < 2 || !syncCanvas()) return;
+
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  video.classList.toggle('hidden', !opt.video.checked);
+  video.style.transform = opt.mirror.checked
+    ? 'translate(-50%,-50%) scaleX(-1)'
+    : 'translate(-50%,-50%)';
+  if (!opt.video.checked) {
+    ctx.fillStyle = '#07080c';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  if (video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    window.__last = landmarker.detectForVideo(video, now);
+  }
+  const res = window.__last;
+  const hands = res?.landmarks ?? [];
+  const lms = hands[0] || null;
+  const left = res?.handedness?.[0]?.[0]?.categoryName === 'Left';
+
+  if (lms) pushHist(lms, left, now);
+  else custom.hist = [];
+
+  if (custom.rec) {
+    recordFrame(lms, left, now);
+    counterEl.classList.toggle('rec', now >= custom.rec?.startAt);
+  } else {
+    counterEl.classList.remove('rec');
+    // живая проверка: что сейчас узнаётся и насколько уверенно
+    const pose = lms ? classify(poseVec(lms, left), POSE_DIMS) : null;
+    const mv = lms ? motionVec() : null;
+    const motion = mv ? classify(mv, MOTION_DIMS) : null;
+    const best = [pose, motion].filter(Boolean).sort((a, b) => similarity(b) - similarity(a))[0] || null;
+    trainer.best = best;
+
+    const mine = custom.items.filter(g => !g.name.startsWith('__'));
+    if (!mine.length) {
+      repsEl.textContent = '—';
+      phaseEl.textContent = 'запиши первый жест в панели справа';
+    } else if (!lms) {
+      repsEl.textContent = '—';
+      phaseEl.textContent = 'покажи руку';
+    } else if (best) {
+      const v = similarity(best);
+      repsEl.textContent = `${Math.round(v * 100)}%`;
+      phaseEl.textContent = `${confidenceWord(v)}: ${best.g.name} `
+        + `(${best.g.kind === 'pose' ? 'поза' : 'движение'})`;
+    } else {
+      repsEl.textContent = '0%';
+      phaseEl.textContent = mv ? 'движение не похоже ни на один жест'
+                               : 'поза не похожа ни на один жест';
+    }
+    repsLeftEl.textContent = `жестов ${mine.length}`;
+    repsRightEl.textContent = best ? `голосов ${best.votes}/${KNN}` : '';
+  }
+
+  if (drawing) {
+    hands.forEach((h, i) => {
+      const label = i === 0 && trainer.best && !custom.rec ? trainer.best.g.name : `рука ${i + 1}`;
+      drawHand(h, i, label);
+    });
+    drawRecProgress(W, H, now);
+  }
+
+  handsEl.textContent = `рук: ${hands.length}`;
+  gestEl.textContent = custom.rec ? 'запись жеста' : (trainer.best ? trainer.best.g.name : 'тренер');
+  lastHandAt = now;
 }
 
 // --- главный цикл ----------------------------------------------------------
@@ -3929,6 +4046,7 @@ function loop() {
   if (mode === 'wow') { runWow(drawing); tickFps(); return; }
   if (mode === 'tony') { runTony(drawing); tickFps(); return; }
   if (mode === 'xray') { runXray(drawing); tickFps(); return; }
+  if (mode === 'trainer') { runTrainer(drawing); tickFps(); return; }
 
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
@@ -4015,6 +4133,7 @@ const MODE_NAMES = {
   wow: 'вау-режим',
   tony: 'режим Тони',
   xray: 'рентген',
+  trainer: 'тренер жестов',
   laid: 'режим Дэвида Лэйда',
   posture: 'режим осанки',
   guard: 'режим охраны',
@@ -4023,11 +4142,12 @@ const MODE_NAMES = {
 async function setMode(next) {
   if (mode === next) return;
   mode = next;
-  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow', 'tony', 'xray']) {
+  for (const name of ['laid', 'posture', 'guard', 'edit', 'wow', 'tony', 'xray', 'trainer']) {
     document.body.classList.toggle(`mode-${name}`, mode === name);
   }
+  if (mode !== 'trainer' && custom.rec) stopTraining(true);
   counterEl.hidden = mode === 'gestures';
-  counterEl.classList.remove('bad', 'warn');
+  counterEl.classList.remove('bad', 'warn', 'rec');
   modeBtns.forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
   lastVideoTime = -1;                       // модели считают кадры по времени
   toast(MODE_NAMES[mode] || mode);
@@ -4041,6 +4161,13 @@ async function setMode(next) {
   if (mode !== 'laid') stopMedia();
 
   if (!['edit', 'wow', 'tony', 'xray'].includes(mode)) stopEditRec();
+
+  if (mode === 'trainer') {
+    custom.hist = [];
+    say('запиши жест или проверь записанные');
+    loadCustom();
+    return;
+  }
 
   if (mode === 'xray') {
     xray.pts = [];

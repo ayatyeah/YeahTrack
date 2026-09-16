@@ -40,6 +40,7 @@
         <button class="mode" id="modeWow" data-mode="wow">Вау-режим</button>
         <button class="mode" id="modeTony" data-mode="tony">Режим Тони</button>
         <button class="mode" id="modeXray" data-mode="xray">Рентген</button>
+        <button class="mode" id="modeTrainer" data-mode="trainer">Тренер жестов</button>
       </div>
       <label class="row">
         <span>Скелет</span>
@@ -95,9 +96,14 @@
         <span>Распознавать мои</span>
         <input type="checkbox" id="optCustom" checked>
       </label>
-      <div id="customList" class="gestures-only custom-list"></div>
+      <p class="hint gestures-only">Записывать и проверять свои жесты —
+      в режиме «Тренер жестов».</p>
 
-      <div class="gestures-only trainer">
+      <div class="sep trainer-only">Мои жесты</div>
+      <div id="customList" class="trainer-only custom-list"></div>
+
+      <div class="sep trainer-only">Новый жест</div>
+      <div class="trainer-only trainer">
         <input id="gName" class="field" placeholder="Название, например «рок»" maxlength="40">
         <select id="gKind">
           <option value="pose">Поза — держишь форму руки</option>
